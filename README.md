@@ -12,11 +12,15 @@
 
 维护者：**david yang** · 联系邮箱：[xting.yang@gmail.com](mailto:xting.yang@gmail.com)。
 
+![NoteGlow 实际效果：测试 Markdown 的颜色、列表、代码与多笔记引用](assets/noteglow-demo.png)
+
+[下载安装包](https://github.com/David2007/noteglow/releases/latest) · [查看演示 Markdown](examples/NoteGlow-demo.md)
+
 ## 安装
 
 仅支持 Obsidian 桌面端。已实际验证的环境为 macOS、Obsidian **1.14.4**、Codex CLI **0.162.1**；Windows、Linux 和其他 CLI 版本尚未验证。使用前先按 [Codex CLI 官方文档](https://developers.openai.com/codex/cli)安装、登录，并确认终端中的 Codex 可以正常对话。
 
-1. 从本仓库的 **Releases** 页面下载同一版本的 `main.js`、`manifest.json`、`styles.css`、`LICENSE` 和 `THIRD_PARTY_NOTICES.txt`。若尚无 Release，请使用下文的源码构建方式。
+1. 推荐从本仓库的 **Releases** 页面下载 `NoteGlow-<版本>.zip`，解压后将 `codex-notes` 文件夹放入 `<Vault>/.obsidian/plugins/`。也可下载同一版本的 `main.js`、`manifest.json`、`styles.css`、`LICENSE` 和 `THIRD_PARTY_NOTICES.txt`。若尚无 Release，请使用下文的源码构建方式。
 2. 退出 Obsidian，将这五个文件放入 `<Vault>/.obsidian/plugins/codex-notes/`；目录名必须为 `codex-notes`，不要再套一层文件夹。
 3. 重新打开 Obsidian，在「设置 → 第三方插件」中手动启用 **NoteGlow**。
 4. 在插件设置中核对「Codex CLI 路径」「Vault 权限」和「自动审核批准要求」。自动寻找失败时填写 `codex` 可执行文件的完整路径。
@@ -121,7 +125,7 @@ npm run install:local -- /完整/Vault/路径
 
 可选草稿文件格式为 `{ "text": "旧输入框中的完整文字" }`。定制安装备份位于 `<Vault>/.obsidian/codex-notes-backups/<时间戳>/`。回滚前先备份新插件数据、停止运行中的请求并禁用本插件，再核对恢复相应启用列表、工具栏、快捷键及工作区配置；不要覆盖安装后新增的笔记或对话。
 
-截至 2026-10-17，已执行构建、真实 Obsidian 界面及文件迁移集成验证；远程单元测试与覆盖率尚未运行，不能视为已通过。后续提交请以对应提交的 CI 结果为准。
+截至 2026-10-17，[远程 CI](https://github.com/David2007/noteglow/actions/runs/39075678535) 的构建与 67 项测试通过；CI 产物已在全新演示 Vault 中安装并完成真实 Codex 对话。覆盖率尚未测量；并发多窗格保存和保存中禁用插件的动态路径仍未实测。后续提交以对应提交的 CI 结果为准。
 
 ## 许可证与上游归属
 
