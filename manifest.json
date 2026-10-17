@@ -1,0 +1,9 @@
+{
+  "id": "codex-notes",
+  "name": "Codex Notes",
+  "version": "0.3.1",
+  "minAppVersion": "1.14.4",
+  "description": "Chat with your notes through Codex CLI, attach multiple selections, choose models, and save portable Markdown colors.",
+  "author": "david yang",
+  "isDesktopOnly": true
+}

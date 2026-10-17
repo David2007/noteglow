@@ -1,0 +1,53 @@
+.codex-notes-view { display: flex; flex-direction: column; height: 100%; padding: 0; background: var(--background-primary); }
+.codex-notes-view [hidden] { display: none !important; }
+.codex-notes-header { display: flex; align-items: center; gap: 6px; padding: 10px 12px 8px; border-bottom: 1px solid var(--background-modifier-border); }
+.codex-notes-title { display: flex; align-items: center; gap: 6px; font-weight: var(--font-semibold); }
+.codex-notes-title svg { width: 18px; color: var(--interactive-accent); }
+.codex-notes-conversation-select { min-width: 0; flex: 1; max-width: 14rem; }
+.codex-notes-icon-button { padding: 4px; flex-shrink: 0; }
+.codex-notes-status { padding: 5px 12px; color: var(--text-muted); font-size: var(--font-ui-smaller); background: var(--background-secondary); }
+.codex-notes-progress { display: flex; max-height: 100px; flex-direction: column; gap: 5px; overflow-y: auto; padding: 7px 12px; background: var(--background-secondary-alt); color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.codex-notes-progress-row { display: flex; align-items: flex-start; gap: 6px; overflow-wrap: anywhere; }
+.codex-notes-progress-icon { display: inline-flex; flex: 0 0 auto; }
+.codex-notes-progress-icon svg { width: 14px; height: 14px; }
+.codex-notes-progress-row.is-success { color: var(--text-success); }
+.codex-notes-progress-row.is-error { color: var(--text-error); }
+.codex-notes-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+.codex-notes-empty { display: flex; min-height: 70%; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text-muted); }
+.codex-notes-empty-icon { color: var(--interactive-accent); }
+.codex-notes-empty-icon svg { width: 32px; height: 32px; }
+.codex-notes-empty h3 { margin: 12px 0 6px; color: var(--text-normal); }
+.codex-notes-empty p { max-width: 280px; margin: 0; line-height: 1.6; }
+.codex-notes-message { margin-bottom: 14px; }
+.codex-notes-message-role { margin-bottom: 5px; color: var(--text-muted); font-size: var(--font-ui-smaller); font-weight: var(--font-semibold); }
+.codex-notes-message-body { padding: 9px 11px; border-radius: var(--radius-m); line-height: 1.55; overflow-wrap: anywhere; }
+.codex-notes-message.is-user .codex-notes-message-body { background: var(--interactive-accent); color: var(--text-on-accent); white-space: pre-wrap; }
+.codex-notes-message.is-assistant .codex-notes-message-body { background: var(--background-secondary); }
+.codex-notes-message.is-system .codex-notes-message-body { border: 1px solid var(--background-modifier-error); color: var(--text-error); background: var(--background-modifier-error-hover); white-space: pre-wrap; }
+.codex-notes-message-body > :first-child { margin-top: 0; }
+.codex-notes-message-body > :last-child { margin-bottom: 0; }
+.codex-notes-composer { flex-shrink: 0; padding: 8px 10px 10px; border-top: 1px solid var(--background-modifier-border); background: var(--background-primary); }
+.codex-notes-attachments { display: flex; flex-wrap: wrap; gap: 4px; max-height: 72px; overflow-y: auto; margin-bottom: 6px; align-content: flex-start; }
+.codex-notes-attachment { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; height: 28px; padding: 0 2px 0 4px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); background: var(--background-secondary); }
+.codex-notes-attachment-label { min-width: 0; max-width: 210px; height: 24px; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-ui-smaller); box-shadow: none; border: none; background: transparent; }
+.codex-notes-attachment-remove { width: 22px; height: 24px; flex-shrink: 0; padding: 3px; }
+.codex-notes-attachment-remove svg { width: 13px; height: 13px; }
+.codex-notes-history-attachments { margin: 0 0 5px; }
+.codex-notes-input { display: block; width: 100%; min-height: 72px; max-height: 140px; resize: none; overflow-y: auto; line-height: 1.5; }
+.codex-notes-actions { display: flex; align-items: center; gap: 5px; margin-top: 7px; }
+.codex-notes-actions > button { flex-shrink: 0; }
+.codex-notes-model-select { flex: 1; min-width: 60px; max-width: 100%; font-size: var(--font-ui-smaller); text-overflow: ellipsis; }
+.codex-notes-preview-path { overflow-wrap: anywhere; font-weight: var(--font-semibold); }
+.codex-notes-preview-meta { color: var(--text-muted); font-size: var(--font-ui-smaller); margin: 7px 0; }
+.codex-notes-preview pre { max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-text-size); user-select: text; }
+.codex-notes-conversation-list { display: flex; flex-direction: column; gap: 8px; max-height: 65vh; overflow-y: auto; margin-top: 12px; }
+.codex-notes-conversation-row { display: flex; align-items: center; gap: 6px; padding: 8px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
+.codex-notes-conversation-row.is-active { border-color: var(--interactive-accent); }
+.codex-notes-conversation-details { flex: 1; min-width: 0; }
+.codex-notes-conversation-details input { width: 100%; }
+.codex-notes-conversation-meta, .codex-notes-conversation-empty { color: var(--text-muted); font-size: var(--font-ui-smaller); margin-top: 4px; }
+.codex-notes-conversation-row-actions, .codex-notes-confirm-actions { display: flex; gap: 4px; }
+.codex-notes-confirm-actions { justify-content: flex-end; }
+.codex-notes-settings-note { margin-top: 20px; padding: 12px 14px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); background: var(--background-secondary); }
+.codex-notes-settings-note p { margin-bottom: 0; color: var(--text-muted); }
+@media (max-width: 400px) { .codex-notes-attachment-label { max-width: 170px; } .codex-notes-title { gap: 3px; } }

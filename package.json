@@ -1,0 +1,38 @@
+{
+  "name": "codex-notes",
+  "version": "0.3.1",
+  "description": "Chat with notes through Codex CLI, attach selections, choose models, and save portable Markdown colors.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mjs",
+    "install:local": "npm run build && node --experimental-strip-types scripts/install-local.mjs",
+    "migrate:colors": "node --experimental-strip-types scripts/migrate-note-colors.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "codex",
+    "chatgpt"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.28.2",
+    "obsidian": "latest",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "entities": "6.0.1",
+    "mdast-util-from-markdown": "2.1.0",
+    "mdast-util-gfm": "3.1.0",
+    "micromark-extension-gfm": "3.0.0",
+    "parse5": "8.0.1"
+  },
+  "author": {
+    "name": "david yang",
+    "email": "xting.yang@gmail.com"
+  }
+}
