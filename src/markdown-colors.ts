@@ -129,7 +129,10 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
 
 function parseMarkdown(text: string): MdNode {
   if (text.length > MAX_CHARS) throw new Error("当前文档超过 100 万字符，未执行同步改色。");
-  return fromMarkdown(text, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] }) as unknown as MdNode;
+  // YAML 不参与正文解析。等长遮罩保留 CR/LF 与 UTF16 offset，也避免 micromark 吞掉 BOM 后位置整体偏移。
+  const yamlEnd = frontmatterEnd(text);
+  const source = yamlEnd ? text.slice(0, yamlEnd).replace(/[^\r\n]/g, " ") + text.slice(yamlEnd) : text;
+  return fromMarkdown(source, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] }) as unknown as MdNode;
 }
 function position(node: MdNode): { from: number; to: number } {
   const from = node.position?.start.offset, to = node.position?.end.offset;
@@ -500,19 +503,19 @@ function rejectUnknown(model: Model, from: number, to: number): void {
   if (protectedRange) throw new Error(`选区包含尚不支持着色的${protectedRange.kind}扩展语法，未改动正文。`);
 }
 
+function frontmatterEnd(text: string): number {
+  // 仅文档第一行开启 YAML；未闭合时保护至全文末尾，不猜测属性范围。
+  const yamlOpen = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\r|\n|$)/.exec(text);
+  if (!yamlOpen) return 0;
+  const close = /^(?:---|\.\.\.)[ \t]*(?:\r\n|\r|\n|$)/m.exec(text.slice(yamlOpen[0].length));
+  return close ? yamlOpen[0].length + close.index + close[0].length : text.length;
+}
+
 /** 仅作为已完整解析文档上的安全护栏，不尝试把未知 Obsidian 扩展当作普通文本重写。 */
 function protectedExtensions(text: string, code: readonly Leaf[], prose: readonly Leaf[]): Array<{ from: number; to: number; kind: string }> {
   const output: Array<{ from: number; to: number; kind: string }> = [];
-  // 仅文档第一行可开启 YAML；GFM 不认识它，不能让属性值落入普通正文着色流程。
-  const yamlOpen = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\r|\n|$)/.exec(text);
-  let yamlEnd = 0;
-  if (yamlOpen) {
-    yamlEnd = text.length;
-    const rest = text.slice(yamlOpen[0].length);
-    const close = /^(?:---|\.\.\.)[ \t]*(?:\r\n|\r|\n|$)/m.exec(rest);
-    if (close) yamlEnd = yamlOpen[0].length + close.index + close[0].length;
-    output.push({ from: 0, to: yamlEnd, kind: "YAML frontmatter" });
-  }
+  const yamlEnd = frontmatterEnd(text);
+  if (yamlEnd) output.push({ from: 0, to: yamlEnd, kind: "YAML frontmatter" });
   const excluded = [...code].sort((a, b) => a.from - b.from);
   const containing = <T extends { from: number; to: number }>(items: readonly T[], offset: number): T | undefined => {
     let low = 0, high = items.length;

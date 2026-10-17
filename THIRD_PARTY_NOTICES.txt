@@ -1,4 +1,4 @@
-Third-party notices for Codex Notes 0.3.1
+Third-party notices for NoteGlow 0.3.1
 
 Bundled runtime dependencies and their license texts. Obsidian and CodeMirror are supplied by the host app, not bundled here.
 

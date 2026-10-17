@@ -178,9 +178,11 @@ test("nested list and blockquote code keep outer containers", () => {
 });
 
 test("second code coloring and clear preserve code container without nested spans", () => {
-  const first = paint("```go\nx < 1\n```\n", "x").text;
-  const second = paint(first, "x", "foreground", fg).text;
+  const first = paint("```go\nx < 1\n```\n", "x");
+  assert.equal(first.text.slice(first.from, first.to), "x");
+  const second = applyMarkdownColor(first.text, first.from, first.to, "foreground", fg).text;
   assert.equal(codeText(second), "x < 1\n");
+  assert.deepEqual(paintedText(second), [{ text: "x", style: `color:${fg};background-color:${bg}` }]);
   noNestedSpans(second);
   const cleared = applyMarkdownColor(second, 0, second.length);
   assert.equal(codeText(cleared.text), "x < 1\n");
@@ -242,6 +244,19 @@ test("YAML frontmatter is protected without blocking ordinary Setext headings or
   }
   assert.ok(paint("Heading\n---\n", "Heading").text.endsWith("\n---\n"));
   assert.ok(paint("prose\n\n---\n\n正文", "prose").text.includes("\n\n---\n\n正文"));
+});
+
+test("BOM and CRLF YAML stay byte-exact while later prose uses original source offsets", () => {
+  const prefix = '\uFEFF---\r\ntitle: Foo\r\ndescription: "**metadata**"\r\n...\r\n';
+  const source = prefix + "before 正文 after\r\n";
+  const result = paint(source, "正文");
+  assert.equal(result.text.slice(0, prefix.length), prefix);
+  assert.equal(result.text.slice(result.from, result.to), "正文");
+  assert.equal(paintedText(result.text)[0].text, "正文");
+  const clear = applyMarkdownColor(result.text, result.from, result.to);
+  assert.equal(clear.text, source);
+  const formatted = formatMarkdownSelection(source, ...select(source, "正文"), "bold");
+  assert.equal(formatted.text, prefix + "before **正文** after\r\n");
 });
 
 test("returned selections support color, bold, italic and clear without reselecting HTML tags", () => {

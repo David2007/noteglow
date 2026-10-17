@@ -36,7 +36,7 @@ export default class CodexWorkspacePlugin extends Plugin {
       (leaf: WorkspaceLeaf) => new CodexChatView(leaf, this)
     );
 
-    this.addRibbonIcon("bot", "打开 Codex 笔记助手", () => void this.activateView());
+    this.addRibbonIcon("bot", "打开 NoteGlow", () => void this.activateView());
     this.addCommand({
       id: "open-codex-chat",
       name: "打开 Codex 对话",
@@ -139,7 +139,7 @@ export default class CodexWorkspacePlugin extends Plugin {
     try {
       await this.activateView();
       const chat = this.app.workspace.getLeavesOfType(CODEX_VIEW_TYPE)[0]?.view;
-      if (!(chat instanceof CodexChatView)) throw new Error("无法打开 Codex 笔记助手。");
+      if (!(chat instanceof CodexChatView)) throw new Error("无法打开 NoteGlow。");
       await chat.addAttachment(attachment);
     } catch (error) {
       new Notice(error instanceof Error ? error.message : "添加选区失败。");

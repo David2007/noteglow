@@ -32,7 +32,7 @@ export class CodexChatView extends ItemView {
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: CodexWorkspacePlugin) { super(leaf); }
   getViewType(): string { return CODEX_VIEW_TYPE; }
-  getDisplayText(): string { return "Codex 笔记助手"; }
+  getDisplayText(): string { return "NoteGlow"; }
   getIcon(): string { return "bot"; }
 
   async onOpen(): Promise<void> {
@@ -57,7 +57,7 @@ export class CodexChatView extends ItemView {
     const header = root.createDiv({ cls: "codex-notes-header" });
     const title = header.createDiv({ cls: "codex-notes-title" });
     setIcon(title.createSpan(), "bot");
-    title.createSpan({ text: "Codex" });
+    title.createSpan({ text: "NoteGlow" });
     this.conversationSelect = header.createEl("select", { cls: "codex-notes-conversation-select", attr: { "aria-label": "切换对话" } });
     this.registerDomEvent(this.conversationSelect, "change", () => this.runAction(() => this.switchConversation()));
     this.actionButtons = [];

@@ -30,7 +30,7 @@ test("adds an explicit path and exact selected text", () => {
 test("rejects empty and oversized context", () => {
   assert.match(
     validateContextAttachment({ kind: "selection", path: "note.md", content: "" }) ?? "",
-    /没有可添加/
+    /没有可附加的文字内容/
   );
   assert.match(
     validateContextAttachment({
@@ -58,7 +58,7 @@ test("enforces aggregate size and attachment count exactly at the boundary", () 
   assert.match(validateAttachments([quote("x".repeat(MAX_CONTEXT_CHARS)), quote("y")]), /合计超过/);
   assert.equal(validateAttachments(Array.from({ length: 30 }, (_, i) => quote("x", String(i)))), null);
   assert.match(validateAttachments(Array.from({ length: 31 }, (_, i) => quote("x", String(i)))), /30/);
-  assert.throws(() => buildPromptWithContext("分析", [quote("")]), /没有可添加/);
+  assert.throws(() => buildPromptWithContext("分析", [quote("")]), /没有可附加的文字内容/);
   assert.match(validateContextAttachment({ ...quote(), path: " " }), /没有可用路径/);
 });
 
