@@ -1,5 +1,6 @@
 import type { ChatMessage, Conversation, PluginSettings, SandboxMode } from "./types";
 import { parseAttachments } from "./context.ts";
+import { parseImages } from "./image-attachments.ts";
 
 export const CONVERSATION_SCHEMA_VERSION = 1;
 export const MAX_CONVERSATIONS = 100;
@@ -195,7 +196,7 @@ function createConversation(
     updatedAt: timestamp,
     archived: false,
     messages: values.messages ?? [],
-    draftText: "", draftAttachments: [], model: ""
+    draftText: "", draftAttachments: [], draftImages: [], model: ""
   };
 }
 
@@ -219,6 +220,7 @@ function parseConversation(value: unknown): Conversation | null {
     messages: messages.slice(-MAX_MESSAGES_PER_CONVERSATION),
     draftText: typeof value.draftText === "string" ? value.draftText : "",
     draftAttachments: parseAttachments(value.draftAttachments),
+    draftImages: parseImages(value.draftImages),
     model: typeof value.model === "string" ? value.model : ""
   };
 }
@@ -232,7 +234,8 @@ function parseMessage(value: unknown): ChatMessage | null {
   if (!id || text === null || createdAt === null || (role !== "user" && role !== "assistant" && role !== "system")) {
     return null;
   }
-  return { id, role, text, createdAt, ...(Array.isArray(value.attachments) ? { attachments: parseAttachments(value.attachments) } : {}) };
+  return { id, role, text, createdAt, ...(Array.isArray(value.attachments) ? { attachments: parseAttachments(value.attachments) } : {}),
+    ...(Array.isArray(value.images) ? { images: parseImages(value.images) } : {}) };
 }
 
 function titleFromMessages(messages: ChatMessage[]): string {

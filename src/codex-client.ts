@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { access } from "node:fs/promises";
 import { delimiter, isAbsolute } from "node:path";
+import { MAX_IMAGES } from "./image-attachments.ts";
 import { parseCodexEvent } from "./codex-events.ts";
 import type { CodexExecutionSettings, CodexRunCallbacks } from "./types";
 
@@ -46,6 +47,7 @@ export class CodexClient {
     callbacks: CodexRunCallbacks
   ): Promise<string> {
     if (this.running) throw new Error("Codex 正在处理其他请求。");
+    const args = buildCodexArgs(settings, vaultPath);
     this.starting = true;
     this.cancelled = false;
     let executable: string;
@@ -53,8 +55,6 @@ export class CodexClient {
       executable = await this.resolveExecutable(settings.codexPath);
       if (this.cancelled) throw new Error("Codex 执行已停止。");
     } catch (error) { this.starting = false; throw error; }
-    const args = buildCodexArgs(settings, vaultPath);
-
     callbacks.onStatus(settings.sessionId ? "正在继续对话…" : "正在启动 Codex…");
 
     return await new Promise<string>((resolve, reject) => {
@@ -136,13 +136,18 @@ export class CodexClient {
 
 export function buildCodexArgs(settings: CodexExecutionSettings, vaultPath: string): string[] {
   const model = settings.model ? ["--model", settings.model] : [];
+  const images = settings.imagePaths ?? [];
+  if (images.length > MAX_IMAGES || images.some((path) => !isAbsolute(path) || path.includes("\0"))) throw new Error("图片发送路径无效。");
+  const imageArgs = images.flatMap((path) => ["--image", path]);
+  // exec 的 --image 接受多个值；用 -- 明确结束选项，防止 stdin 的 '-' 被当作图片路径。
+  const input = images.length ? ["--", "-"] : ["-"];
   if (settings.sessionId) {
     // 续聊也显式传模型并允许非 Git Vault；无需另一个包装脚本修补参数。
     const sandbox = ["-c", `sandbox_mode="${settings.sandboxMode}"`];
     const approvals = ["-c", 'approval_policy="on-request"', "-c",
       `approvals_reviewer="${settings.approveForMe && settings.sandboxMode === "workspace-write" ? "auto_review" : "user"}"`];
     // exec resume 会重新加载全局配置，不能依赖旧会话或本机全局权限来保证当前 Vault 边界。
-    return ["exec", "resume", "--json", "--skip-git-repo-check", ...sandbox, ...approvals, ...model, settings.sessionId, "-"];
+    return ["exec", "resume", "--json", "--skip-git-repo-check", ...sandbox, ...approvals, ...model, ...imageArgs, settings.sessionId, ...input];
   }
 
   const approvalArgs = settings.approveForMe && settings.sandboxMode === "workspace-write"
@@ -157,7 +162,8 @@ export function buildCodexArgs(settings: CodexExecutionSettings, vaultPath: stri
     ...approvalArgs,
     "--cd",
     vaultPath,
-    "-"
+    ...imageArgs,
+    ...input
   ];
 }
 

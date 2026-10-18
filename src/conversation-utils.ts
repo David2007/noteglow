@@ -31,6 +31,10 @@ export function exportConversationMarkdown(conversation: Conversation, exportedA
       const location = attachment.startLine ? `（第 ${attachment.startLine}–${attachment.endLine ?? attachment.startLine} 行）` : "";
       lines.push(`引用：${attachment.path}${location}`, "", ...attachment.content.split("\n").map((line) => `> ${line}`), "");
     }
+    for (const image of message.images ?? []) {
+      // 图片仍保存在当前 Vault 的插件私有目录，导出不复制二进制或泄露原文件的绝对路径。
+      lines.push(`图片附件：${image.name.replace(/[\r\n]/g, " ")}（${image.width}×${image.height}，SHA256 ${image.sha256}；原图请在 NoteGlow 对话中查看）`, "");
+    }
   }
   return `${lines.join("\n").trimEnd()}\n`;
 }
