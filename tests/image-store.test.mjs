@@ -16,12 +16,12 @@ test('private copy survives deletion of original and exports only Vault-relative
  assert.equal(await store.resourcePath(item),`${plugin}/image-attachments/${item.fileName}`);
 });
 test('send snapshots are independent files and are removed on dispose, while history remains',async t=>{
- const {root,plugin,store}=await setup(t);const a=await store.add('1.png',png()),b=await store.add('2.png',png(24,16,[12,180,29]));
- const prepared=await store.prepare([a,b]);assert.equal(prepared.paths.length,2);
- assert.deepEqual(await readFile(prepared.paths[0]),png());assert.equal((await stat(prepared.paths[0])).mode&0o777,0o600);
+ const {root,plugin,store}=await setup(t);const images=[];for(let i=0;i<10;i++)images.push(await store.add(`${i}.png`,png(24,16,[i,180,29])));const a=images[0];
+ const prepared=await store.prepare(images);assert.equal(prepared.paths.length,10);
+ assert.deepEqual(await readFile(prepared.paths[0]),png(24,16,[0,180,29]));assert.equal((await stat(prepared.paths[0])).mode&0o777,0o600);
  const cache=join(root,plugin,'image-attachments',a.fileName);await writeFile(cache,Buffer.from('changed'));
- assert.deepEqual(await readFile(prepared.paths[0]),png());await prepared.dispose();await prepared.dispose();
- await assert.rejects(stat(prepared.paths[0]),{code:'ENOENT'});assert.equal((await readdir(join(root,plugin,'image-attachments'))).length,2);
+ assert.deepEqual(await readFile(prepared.paths[0]),png(24,16,[0,180,29]));await prepared.dispose();await prepared.dispose();
+ await assert.rejects(stat(prepared.paths[0]),{code:'ENOENT'});assert.equal((await readdir(join(root,plugin,'image-attachments'))).length,10);
 });
 test('missing, tampered, symlinked and malformed records never produce send paths',async t=>{
  const {root,plugin,store}=await setup(t);const item=await store.add('img.png',png());const file=join(root,plugin,'image-attachments',item.fileName);
@@ -37,6 +37,6 @@ test('refuses symlinked parent before creating a cache and refuses symlinked cac
 });
 test('rejects traversal roots, oversized requests and malformed bytes without creating artifacts',async t=>{
  const {root,plugin,store}=await setup(t);assert.throws(()=>new ImageStore(root,'../../out'),/Vault/);assert.throws(()=>new ImageStore(root,'/absolute'),/Vault/);
- await assert.rejects(store.add('bad.svg',Buffer.from('<svg/>')),/仅支持/);await assert.rejects(store.prepare([{}, {}, {}, {}, {}]),/4/);
+ await assert.rejects(store.add('bad.svg',Buffer.from('<svg/>')),/仅支持/);await assert.rejects(store.prepare(Array(11).fill({})),/10/);
  const empty=await store.prepare([]);assert.deepEqual(empty.paths,[]);await empty.dispose();await assert.rejects(stat(join(root,plugin,'image-attachments')),{code:'ENOENT'});
 });

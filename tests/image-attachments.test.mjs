@@ -39,16 +39,18 @@ test('validates per-image metadata, path and MIME together instead of trusting J
   for(const override of [{fileName:'../auth.json'},{id:'../x'},{mime:'text/html'},{sha256:'broken'},{size:0},{size:MAX_IMAGE_BYTES+1},{width:0},{name:'\nsecret'},{name:'a'.repeat(201)}])assert.equal(isImageAttachment({...good,...override}),false);
   assert.equal(isImageAttachment(null),false);assert.equal(isImageAttachment([]),false);
 });
-test('enforces four images and 20MiB at exact boundaries independently of text limits', () => {
+test('enforces ten images and 20MiB at exact boundaries independently of text limits', () => {
   assert.equal(validateImages([image({size:MAX_IMAGE_BYTES}),image({size:MAX_IMAGE_BYTES})]),null);
   assert.match(validateImages([image({size:MAX_IMAGE_BYTES}),image({size:MAX_IMAGE_BYTES}),image()]),/20 MiB/);
-  assert.equal(validateImages(Array.from({length:4},()=>image())),null);
-  assert.match(validateImages(Array.from({length:5},()=>image())),/4/);
+  assert.equal(validateImages(Array.from({length:10},()=>image({size:2*1024*1024}))),null);
+  assert.match(validateImages(Array.from({length:11},()=>image())),/10/);
+  const overTotal=Array.from({length:10},()=>image({size:2*1024*1024}));
+  overTotal[0].size++;assert.match(validateImages(overTotal),/20 MiB/);
   assert.match(validateImages([{}]),/不完整/);
 });
 test('loads legacy settings with no images and drops malformed image paths, never dereferences them', () => {
   assert.deepEqual(parseImages(undefined),[]);assert.deepEqual(parseImages({images:[]}),[]);
   const one=image(), two=image(); const parsed=parseImages([one,{...one,fileName:'/etc/passwd'},two]);
   assert.deepEqual(parsed,[one,two]);assert.notEqual(parsed[0],one);
-  assert.equal(parseImages(Array.from({length:5},()=>image())).length,4);
+  assert.equal(parseImages(Array.from({length:11},()=>image())).length,10);
 });
