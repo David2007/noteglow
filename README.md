@@ -16,6 +16,15 @@
 
 [下载安装包](https://github.com/David2007/noteglow/releases/latest) · [查看演示 Markdown](examples/NoteGlow-demo.md)
 
+
+## 图片附件
+
+在输入框旁点击“添加图片”，或把截图粘贴到问题框、把图片文件拖到输入区域。支持最多 4 张 PNG、JPEG 或静态 WebP；单张 10 MiB、合计 20 MiB，最大 3200 万像素。点击缩略图可预览，点击 × 从本次问题移除。允许只发图片；新对话与续聊都会通过 CLI 的 `--image` 发送实际图片，不把图片伪装成文字路径。
+
+图片跟随各对话草稿保存，执行失败或停止时保留；历史消息可再次预览。原图私有副本位于 `<Vault>/.obsidian/plugins/codex-notes/image-attachments/`（使用自定义配置目录时跟随该目录），`data.json` 只存随机文件名、尺寸和摘要，不包含 base64 或原始绝对路径。移除草稿卡片不自动删除缓存，避免破坏历史消息；卸载或清理目录前请自行保留需要的原图。Markdown 对话导出仅记录图片名称/尺寸/摘要，不导出原图。
+
+选中并发送的图片会交给本机 CLI 配置的模型服务，适用该账号/服务的数据政策与用量。并非所有模型都支持图片；模型拒绝时会显示错误并保留草稿。不会读取或打包维护者的登录信息。发送使用经摘要复核的临时快照，CLI 完成后清理本轮临时副本。需要支持 `codex exec` 和 `codex exec resume --image` 的 CLI（本机核验版本 0.162.1）。
+
 ## 安装
 
 仅支持 Obsidian 桌面端。已实际验证的环境为 macOS、Obsidian **1.14.4**、Codex CLI **0.162.1**；Windows、Linux 和其他 CLI 版本尚未验证。使用前先按 [Codex CLI 官方文档](https://developers.openai.com/codex/cli)安装、登录，并确认终端中的 Codex 可以正常对话。

@@ -10,6 +10,8 @@ import { randomUUID } from "node:crypto";
 import { type ContextAttachment, validateAttachments } from "./src/context";
 import { readModels, type CodexModel } from "./src/models";
 import { registerNoteColors } from "./src/note-colors";
+import { ImageStore } from "./src/image-store";
+import { validateImages, type ImageAttachment } from "./src/image-attachments";
 
 export default class CodexWorkspacePlugin extends Plugin {
   declare settings: PluginSettings;
@@ -19,6 +21,13 @@ export default class CodexWorkspacePlugin extends Plugin {
   private saveQueue: Promise<void> = Promise.resolve();
   private openingSelection = false;
   private unloaded = false;
+  private imageStorage: ImageStore | undefined;
+
+  get images(): ImageStore {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) throw new Error("图片附件仅支持本机文件系统 Vault。");
+    return this.imageStorage ??= new ImageStore(adapter.getBasePath(), this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`);
+  }
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -146,13 +155,15 @@ export default class CodexWorkspacePlugin extends Plugin {
     } finally { this.openingSelection = false; }
   }
 
-  async updateDraft(text: string, attachments: ContextAttachment[], conversationId = this.activeConversation.id): Promise<void> {
+  async updateDraft(text: string, attachments: ContextAttachment[], conversationId = this.activeConversation.id, images?: readonly ImageAttachment[]): Promise<void> {
     const conversation = this.requireConversation(conversationId);
     const error = validateAttachments(attachments);
     if (error) throw new Error(error);
+    if (images) { const imageError = validateImages(images); if (imageError) throw new Error(imageError); }
     // 内存保留最新草稿；落盘失败不回滚较新的输入，调用方提示并允许再次保存。
     conversation.draftText = text;
     conversation.draftAttachments = attachments.map((attachment) => ({ ...attachment }));
+    if (images) conversation.draftImages = images.map((image) => ({ ...image }));
     await this.persistSettings();
   }
 
@@ -223,7 +234,8 @@ export default class CodexWorkspacePlugin extends Plugin {
     prompt: string,
     onStatus: (status: string) => void,
     onProgress: (event: CodexProgressEvent) => void,
-    conversationId = this.activeConversation.id
+    conversationId = this.activeConversation.id,
+    imagePaths: readonly string[] = []
   ): Promise<string> {
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) {
@@ -237,7 +249,8 @@ export default class CodexWorkspacePlugin extends Plugin {
       sandboxMode: this.settings.sandboxMode,
       approveForMe: this.settings.approveForMe,
       sessionId: conversation.threadId,
-      model: conversation.model
+      model: conversation.model,
+      imagePaths
     }, {
       onThreadId: (threadId) => {
         // 卸载后可能仍收到已缓冲的 stdout；旧实例不能再更新或保存对话。

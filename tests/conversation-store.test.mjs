@@ -20,7 +20,7 @@ test("migrates legacy settings into one resumable conversation", () => {
     approveForMe: false,
     sessionId: "thread-old",
     messages: [message("m1", "user", "整理研究筆記")],
-    draftText: "", draftAttachments: [], model: ""
+    draftText: "", draftAttachments: [], draftImages: [], model: ""
   }, { now: () => 100, makeId: () => "conversation-1" });
 
   assert.equal(loaded.migratedLegacy, true);
@@ -34,7 +34,7 @@ test("migrates legacy settings into one resumable conversation", () => {
     updatedAt: 100,
     archived: false,
     messages: [message("m1", "user", "整理研究筆記")],
-    draftText: "", draftAttachments: [], model: ""
+    draftText: "", draftAttachments: [], draftImages: [], model: ""
   });
 });
 

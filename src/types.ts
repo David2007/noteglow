@@ -6,6 +6,7 @@ export interface ChatMessage {
   text: string;
   createdAt: number;
   attachments?: ContextAttachment[];
+  images?: ImageAttachment[];
 }
 
 export interface Conversation {
@@ -18,6 +19,7 @@ export interface Conversation {
   messages: ChatMessage[];
   draftText: string;
   draftAttachments: ContextAttachment[];
+  draftImages?: ImageAttachment[];
   model: string;
 }
 
@@ -36,6 +38,7 @@ export interface CodexExecutionSettings {
   approveForMe: boolean;
   sessionId: string | null;
   model: string;
+  imagePaths?: readonly string[];
 }
 
 export interface CodexRunCallbacks {
@@ -45,3 +48,4 @@ export interface CodexRunCallbacks {
 }
 import type { CodexProgressEvent } from "./codex-events";
 import type { ContextAttachment } from "./context";
+import type { ImageAttachment } from "./image-attachments";

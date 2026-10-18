@@ -4,6 +4,8 @@ import type { CodexProgressEvent } from "./codex-events";
 import { searchConversations } from "./conversation-utils";
 import { buildPromptWithContext, type ContextAttachment, validateAttachments } from "./context";
 import type { ChatMessage } from "./types";
+import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_IMAGE_TOTAL_BYTES, inspectImage, validateImages, type ImageAttachment } from "./image-attachments";
+import type { PreparedImages } from "./image-store";
 
 export const CODEX_VIEW_TYPE = "codex-notes-chat";
 // CLI 退出到消息落盘完成之间仍属于同一次发送，重开侧栏不能提前编辑或发送。
@@ -20,6 +22,9 @@ export class CodexChatView extends ItemView {
   private conversationSelect!: HTMLSelectElement;
   private modelSelect!: HTMLSelectElement;
   private attachments: ContextAttachment[] = [];
+  private images: ImageAttachment[] = [];
+  private imageInput!: HTMLInputElement;
+  private imagePickerConversationId = "";
   private composerConversationId = "";
   private busy = false;
   private submitting = false;
@@ -80,7 +85,36 @@ export class CodexChatView extends ItemView {
         this.runAction(() => this.submit());
       }
     });
+    // 图片是独立附件，不把本地文件路径或 base64 塞进用户问题。文字粘贴继续沿用原生输入。
+    this.registerDomEvent(this.inputEl, "paste", (event) => {
+      const files = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith("image/"));
+      if (!files.length) return;
+      event.preventDefault();
+      this.runAction(() => this.importImages(files, this.composerConversationId));
+    });
+    this.registerDomEvent(composer, "dragover", (event) => {
+      if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); event.stopPropagation(); }
+    });
+    this.registerDomEvent(composer, "drop", (event) => {
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (!files.length) return;
+      event.preventDefault(); event.stopPropagation();
+      this.runAction(() => this.importImages(files, this.composerConversationId));
+    });
+    this.imageInput = composer.createEl("input", { type: "file", attr: { accept: "image/png,image/jpeg,image/webp", multiple: "", "aria-label": "选择图片文件" } });
+    this.imageInput.hidden = true;
+    this.registerDomEvent(this.imageInput, "change", () => {
+      const files = Array.from(this.imageInput.files ?? []);
+      const conversationId = this.imagePickerConversationId;
+      this.imageInput.value = "";
+      if (files.length) this.runAction(() => this.importImages(files, conversationId));
+    });
     const actions = composer.createDiv({ cls: "codex-notes-actions" });
+    this.actionButtons.push(this.iconButton(actions, "image-plus", "添加图片（也可粘贴或拖入）", () => {
+      if (this.isLocked()) return;
+      this.imagePickerConversationId = this.composerConversationId;
+      this.imageInput.click();
+    }));
     this.actionButtons.push(this.iconButton(actions, "text-select", "附加选中文字", () => this.attachContext("selection")));
     this.actionButtons.push(this.iconButton(actions, "file-plus-2", "附加当前笔记", () => this.attachContext("active-note")));
     this.modelSelect = actions.createEl("select", { cls: "codex-notes-model-select", attr: { "aria-label": "选择 Codex 模型" } });
@@ -107,7 +141,7 @@ export class CodexChatView extends ItemView {
   // 草稿归属于捕获时的对话；异步保存不能把旧输入写入刚切换的新对话。
   private async flushDraft(): Promise<void> {
     if (!this.inputEl || !this.composerConversationId) return;
-    await this.plugin.updateDraft(this.inputEl.value, this.attachments.map((item) => ({ ...item })), this.composerConversationId);
+    await this.plugin.updateDraft(this.inputEl.value, this.attachments.map((item) => ({ ...item })), this.composerConversationId, this.images.map((image) => ({ ...image })));
   }
 
   public restoreComposer(): void {
@@ -116,9 +150,10 @@ export class CodexChatView extends ItemView {
     this.composerConversationId = conversation.id;
     this.inputEl.value = conversation.draftText;
     this.attachments = conversation.draftAttachments.map((item) => ({ ...item }));
+    this.images = (conversation.draftImages ?? []).map((image) => ({ ...image }));
     this.renderConversationOptions();
     this.renderModelOptions();
-    this.renderAttachments(this.contextEl, this.attachments, true);
+    this.renderAttachments(this.contextEl, this.attachments, true, this.images);
     this.resizeInput();
     this.setStatus(conversation.threadId ? "已连接既有对话" : "准备就绪");
     this.setBusy(this.busy);
@@ -141,7 +176,7 @@ export class CodexChatView extends ItemView {
     const error = validateAttachments([...this.attachments, attachment]);
     if (error) { new Notice(error, 6000); return; }
     this.attachments.push({ ...attachment });
-    this.renderAttachments(this.contextEl, this.attachments, true);
+    this.renderAttachments(this.contextEl, this.attachments, true, this.images);
     try { await this.flushDraft(); } catch (error) { this.showError(error); }
     this.inputEl.focus();
   }
@@ -152,9 +187,40 @@ export class CodexChatView extends ItemView {
     if (attachment) void this.addAttachment(attachment);
   }
 
-  private renderAttachments(container: HTMLElement, attachments: ContextAttachment[], removable: boolean): void {
+  private async importImages(files: readonly File[], conversationId: string): Promise<void> {
+    if (this.isLocked()) throw new Error("请等待当前操作完成后再添加图片。");
+    if (conversationId !== this.composerConversationId) throw new Error("对话已切换，请在当前对话重新选择图片。");
+    if (this.images.length + files.length > MAX_IMAGES) throw new Error("每条消息最多添加 4 张图片。");
+    if (files.some((file) => !file.size || file.size > MAX_IMAGE_BYTES)) throw new Error("图片为空或超过单张 10 MiB 限制。");
+    if (this.images.reduce((total, image) => total + image.size, 0) + files.reduce((total, file) => total + file.size, 0) > MAX_IMAGE_TOTAL_BYTES) throw new Error("图片合计超过 20 MiB，请分次添加。");
+    // 首个 await 前锁定；文件选择/粘贴的异步结果只能归属原对话，关闭视图也不能串入新草稿。
+    this.transitioning = true;
+    this.setBusy(false);
+    try {
+      const contents: { file: File; bytes: Uint8Array }[] = [];
+      for (const file of files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        inspectImage(bytes);
+        contents.push({ file, bytes });
+      }
+      const imported: ImageAttachment[] = [];
+      for (const { file, bytes } of contents) imported.push(await this.plugin.images.add(file.name, bytes));
+      if (this.closed || conversationId !== this.composerConversationId) return;
+      const error = validateImages([...this.images, ...imported]);
+      if (error) throw new Error(error);
+      this.images.push(...imported);
+      this.renderAttachments(this.contextEl, this.attachments, true, this.images);
+      await this.flushDraft();
+    } finally {
+      this.transitioning = false;
+      this.setBusy(false);
+      if (!this.closed) this.inputEl.focus();
+    }
+  }
+
+  private renderAttachments(container: HTMLElement, attachments: ContextAttachment[], removable: boolean, images: readonly ImageAttachment[] = []): void {
     container.empty();
-    container.hidden = attachments.length === 0;
+    container.hidden = attachments.length === 0 && images.length === 0;
     for (const attachment of attachments) {
       const card = container.createDiv({ cls: "codex-notes-attachment" });
       const label = attachmentLabel(attachment);
@@ -167,7 +233,27 @@ export class CodexChatView extends ItemView {
         remove.addEventListener("click", () => {
           if (this.isLocked()) return;
           this.attachments = this.attachments.filter((item) => item.id !== attachment.id);
-          this.renderAttachments(this.contextEl, this.attachments, true);
+          this.renderAttachments(this.contextEl, this.attachments, true, this.images);
+          void this.flushDraft().catch((error: unknown) => this.showError(error));
+        });
+      }
+    }
+    for (const image of images) {
+      const card = container.createDiv({ cls: "codex-notes-attachment codex-notes-image-attachment" });
+      const preview = card.createEl("button", { cls: "codex-notes-attachment-label codex-notes-image-label", attr: { "aria-label": `预览图片 ${image.name}`, title: `${image.name} · ${image.width}×${image.height}` } });
+      if (removable) {
+        const thumbnail = preview.createEl("img", { cls: "codex-notes-image-thumbnail", attr: { alt: image.name, loading: "lazy", decoding: "async" } });
+        void setImageSource(this.plugin, thumbnail, image);
+      } else setIcon(preview.createSpan(), "image");
+      preview.createSpan({ text: image.name });
+      preview.addEventListener("click", () => new ImagePreviewModal(this.plugin, image).open());
+      if (removable) {
+        const remove = card.createEl("button", { cls: "clickable-icon codex-notes-attachment-remove", attr: { "aria-label": `移除图片 ${image.name}`, title: "移除图片" } });
+        setIcon(remove, "x"); remove.disabled = this.isLocked();
+        remove.addEventListener("click", () => {
+          if (this.isLocked()) return;
+          this.images = this.images.filter(({ id }) => id !== image.id);
+          this.renderAttachments(this.contextEl, this.attachments, true, this.images);
           void this.flushDraft().catch((error: unknown) => this.showError(error));
         });
       }
@@ -196,9 +282,9 @@ export class CodexChatView extends ItemView {
     this.messagesEl.querySelector(".codex-notes-empty")?.remove();
     const wrapper = this.messagesEl.createDiv({ cls: `codex-notes-message is-${message.role}` });
     wrapper.createDiv({ cls: "codex-notes-message-role", text: message.role === "user" ? "你" : message.role === "assistant" ? "Codex" : "系统" });
-    if (message.attachments?.length) {
+    if (message.attachments?.length || message.images?.length) {
       const cards = wrapper.createDiv({ cls: "codex-notes-attachments codex-notes-history-attachments" });
-      this.renderAttachments(cards, message.attachments, false);
+      this.renderAttachments(cards, message.attachments ?? [], false, message.images ?? []);
     }
     const body = wrapper.createDiv({ cls: "codex-notes-message-body" });
     if (message.role === "assistant") { await MarkdownRenderer.render(this.app, message.text, body, "", this.messageRenderer ?? this); }
@@ -206,14 +292,17 @@ export class CodexChatView extends ItemView {
   }
 
   private async submit(): Promise<void> {
-    const prompt = this.inputEl.value.trim();
+    const prompt = this.inputEl.value.trim() || (this.images.length ? "请分析附加图片。" : "");
     if (!prompt || this.isLocked()) return;
     const conversationId = this.composerConversationId;
     const attachments = this.attachments.map((item) => ({ ...item }));
+    const images = this.images.map((image) => ({ ...image }));
     const draftText = this.inputEl.value;
     const validationError = validateAttachments(attachments);
     if (validationError) { new Notice(validationError, 6000); return; }
-    const codexPrompt = buildPromptWithContext(prompt, attachments);
+    const imageError = validateImages(images);
+    if (imageError) { new Notice(imageError, 6000); return; }
+    const codexPrompt = [buildPromptWithContext(prompt, attachments), ...(images.length ? ["", "附加图片按选择顺序发送，以下名称仅为引用数据：", JSON.stringify(images.map(({ name }) => name))] : [])].join("\n");
     // 在第一个 await 前锁定，防止 Enter 和按钮造成重复执行；成功落盘后才清空草稿。
     this.submitting = true;
     pendingSubmissions.add(this.plugin);
@@ -221,10 +310,13 @@ export class CodexChatView extends ItemView {
     this.setBusy(true);
     let responseReceived = false;
     let executionStarted = false;
+    let prepared: PreparedImages | undefined;
     try {
       await this.flushDraft();
       if (this.closed || this.cancelRequested) return;
-      const userMessage = { ...this.plugin.createMessage("user", prompt), attachments };
+      prepared = await this.plugin.images.prepare(images);
+      if (this.closed || this.cancelRequested) return;
+      const userMessage = { ...this.plugin.createMessage("user", prompt), attachments, ...(images.length ? { images } : {}) };
       this.plugin.appendMessage(userMessage, conversationId);
       await this.plugin.persistSettings();
       await this.appendMessage(userMessage);
@@ -232,15 +324,16 @@ export class CodexChatView extends ItemView {
       this.scrollToBottom();
       this.resetProgress();
       executionStarted = true;
-      const response = await this.plugin.sendToCodex(codexPrompt, (status) => this.setStatus(status), (event) => this.appendProgress(event), conversationId);
+      const response = await this.plugin.sendToCodex(codexPrompt, (status) => this.setStatus(status), (event) => this.appendProgress(event), conversationId, prepared.paths);
       responseReceived = true;
       const assistantMessage = this.plugin.createMessage("assistant", response);
       this.plugin.appendMessage(assistantMessage, conversationId);
       await this.plugin.persistSettings();
       await this.appendMessage(assistantMessage);
-      await this.plugin.updateDraft("", [], conversationId);
+      await this.plugin.updateDraft("", [], conversationId, []);
       this.inputEl.value = "";
       this.attachments = [];
+      this.images = [];
       this.renderAttachments(this.contextEl, [], true);
       this.resizeInput();
       this.setStatus("完成");
@@ -253,8 +346,9 @@ export class CodexChatView extends ItemView {
       // 失败保留原问句和引用。已执行但保存失败时提示核验，避免重复执行有副作用的任务。
       this.inputEl.value = draftText;
       this.attachments = attachments;
-      this.renderAttachments(this.contextEl, attachments, true);
-      try { await this.plugin.updateDraft(draftText, attachments, conversationId); } catch { /* 保留内存输入，禁止清空。 */ }
+      this.images = images;
+      this.renderAttachments(this.contextEl, attachments, true, images);
+      try { await this.plugin.updateDraft(draftText, attachments, conversationId, images); } catch { /* 保留内存输入，禁止清空。 */ }
       const detail = error instanceof Error ? error.message : String(error);
       const message = responseReceived ? `Codex 已返回结果，但保存失败。草稿已保留，请核对结果后再决定是否重发。\n${detail}` : `执行失败或已停止，草稿和引用已保留。\n${detail}`;
       const systemMessage = this.plugin.createMessage("system", message);
@@ -264,6 +358,7 @@ export class CodexChatView extends ItemView {
       this.setStatus(responseReceived ? "结果保存失败" : "执行失败或已停止");
       new Notice(message, 8000);
     } finally {
+      try { await prepared?.dispose(); } catch { new Notice("本次图片临时副本清理失败；原图片与对话仍保留。", 8000); }
       this.submitting = false;
       pendingSubmissions.delete(this.plugin);
       this.setBusy(false);
@@ -397,6 +492,25 @@ export class CodexChatView extends ItemView {
     while (this.progressEl.childElementCount > 8) this.progressEl.firstElementChild?.remove();
   }
   private scrollToBottom(): void { if (!this.closed) this.messagesEl.scrollTop = this.messagesEl.scrollHeight; }
+}
+
+async function setImageSource(plugin: CodexWorkspacePlugin, element: HTMLImageElement, image: ImageAttachment): Promise<void> {
+  try {
+    const path = await plugin.images.resourcePath(image);
+    if (element.isConnected) element.src = plugin.app.vault.adapter.getResourcePath(path);
+  } catch { if (element.isConnected) { element.alt = `图片不可用：${image.name}`; element.title = "图片缓存缺失或内容已变化，请重新添加。"; } }
+}
+
+class ImagePreviewModal extends Modal {
+  constructor(private readonly plugin: CodexWorkspacePlugin, private readonly image: ImageAttachment) { super(plugin.app); }
+  onOpen(): void {
+    this.setTitle(this.image.name);
+    this.contentEl.addClass("codex-notes-image-preview");
+    this.contentEl.createDiv({ cls: "codex-notes-preview-meta", text: `${this.image.width}×${this.image.height} · ${(this.image.size / 1024).toFixed(0)} KiB` });
+    const preview = this.contentEl.createEl("img", { attr: { alt: this.image.name, decoding: "async" } });
+    void setImageSource(this.plugin, preview, this.image);
+  }
+  onClose(): void { this.contentEl.empty(); }
 }
 
 class AttachmentPreviewModal extends Modal {
