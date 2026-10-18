@@ -190,7 +190,7 @@ export class CodexChatView extends ItemView {
   private async importImages(files: readonly File[], conversationId: string): Promise<void> {
     if (this.isLocked()) throw new Error("请等待当前操作完成后再添加图片。");
     if (conversationId !== this.composerConversationId) throw new Error("对话已切换，请在当前对话重新选择图片。");
-    if (this.images.length + files.length > MAX_IMAGES) throw new Error("每条消息最多添加 4 张图片。");
+    if (this.images.length + files.length > MAX_IMAGES) throw new Error(`每条消息最多添加 ${MAX_IMAGES} 张图片。`);
     if (files.some((file) => !file.size || file.size > MAX_IMAGE_BYTES)) throw new Error("图片为空或超过单张 10 MiB 限制。");
     if (this.images.reduce((total, image) => total + image.size, 0) + files.reduce((total, file) => total + file.size, 0) > MAX_IMAGE_TOTAL_BYTES) throw new Error("图片合计超过 20 MiB，请分次添加。");
     // 首个 await 前锁定；文件选择/粘贴的异步结果只能归属原对话，关闭视图也不能串入新草稿。

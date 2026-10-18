@@ -1,4 +1,4 @@
-export const MAX_IMAGES = 4;
+export const MAX_IMAGES = 10;
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 32_000_000;
@@ -15,7 +15,7 @@ export interface ImageAttachment {
 }
 
 export function validateImages(images: readonly ImageAttachment[]): string | null {
-  if (images.length > MAX_IMAGES) return "每条消息最多添加 4 张图片。";
+  if (images.length > MAX_IMAGES) return `每条消息最多添加 ${MAX_IMAGES} 张图片。`;
   let total = 0;
   for (const image of images) {
     if (!isImageAttachment(image)) return "图片附件信息不完整，请重新添加图片。";

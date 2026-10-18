@@ -118,7 +118,7 @@ test("passes selected model on new and resumed turns without relaxing the sandbo
 
 test('passes multiple image files in order on new and resumed turns, keeping stdin distinct', () => {
   for (const sessionId of [null, 'existing']) {
-    const paths=['/private/tmp/图 1.png','/private/tmp/图 2.jpg'];
+    const paths=Array.from({length:10},(_,index)=>`/private/tmp/图 ${index+1}.png`);
     const args=buildCodexArgs({...settings(sessionId),imagePaths:paths},'/vault');
     assert.deepEqual(args.flatMap((value,index)=>value==='--image'?[args[index+1]]:[]),paths);
     assert.deepEqual(args.slice(-2),['--','-']);
@@ -128,7 +128,7 @@ test('passes multiple image files in order on new and resumed turns, keeping std
 });
 test('rejects invalid image paths before claiming a client request slot', async () => {
   const client=new CodexClient();
-  for (const imagePaths of [['relative.png'],['/tmp/a\0.png'],Array(5).fill('/tmp/a.png')]) {
+  for (const imagePaths of [['relative.png'],['/tmp/a\0.png'],Array(11).fill('/tmp/a.png')]) {
     await assert.rejects(client.send('question',process.cwd(),{...settings(null),imagePaths},{onThreadId(){},onStatus(){},onProgress(){}}),/图片发送路径/);
     assert.equal(client.running,false);
   }
