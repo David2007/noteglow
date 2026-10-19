@@ -23,6 +23,28 @@ interface Model { ast: MdNode; leaves: Leaf[]; unknownHtml: Array<{ from: number
 const MAX_CHARS = 1_000_000;
 const MAX_RANGES = 10_000;
 
+/** 仅导出可无损迁移的顶层自有块；未知属性、内容和缺少末尾换行均拒绝。 */
+export function decodeOwnedCodeBlocks(text: string): Array<{ from: number; to: number; code: string; lang: string; ranges: ColorRange[]; positions: Array<{ from: number; to: number }> }> {
+  if (text.length > MAX_CHARS) throw new Error("笔记过大，无法安全迁移。");
+  const ast = parseMarkdown(text), owned = parseOwned(text, ast).owned.filter((item) => item.code && item.block);
+  const protectedRegions = markdownProtectedRanges(text);
+  return owned.map((item) => {
+    if (protectedRegions.some((range) => item.from < range.to && item.to > range.from)) throw new Error("代码块位于受保护的扩展语法中，未迁移。");
+    const top = ast.children?.filter((node) => node.type === "html" && position(node).from <= item.from && position(node).to >= item.to) ?? [];
+    if (top.length !== 1 || text.slice(position(top[0]).from, item.from).trim() || text.slice(item.to, position(top[0]).to).trim() || /[^\r\n]/.test(text.slice(text.lastIndexOf("\n", item.from - 1) + 1, item.from))) throw new Error("只支持独立顶层 HTML 代码块迁移，请先分离嵌套或同行内容。");
+    const flat = flattenHtml(text, item), code = flat.units.map((unit) => unit.value).join("");
+    if (!code.endsWith("\n") || code.includes("\r") && /\r(?!\n)/.test(code)) throw new Error("旧代码缺少末尾换行或使用单独 CR，无法无损恢复围栏。");
+    const node = item.node.childNodes.find((child): child is HtmlElement => isElement(child) && child.tagName === "code")!;
+    const lang = attr(node, "data-codex-lang") ?? attr(node, "class")?.replace(/^language-/, "") ?? "";
+    if (/[\s`~<>]/.test(lang) || attr(node, "class") && attr(node, "class") !== `language-${lang}`) throw new Error("代码语言属性无法安全迁移。");
+    for (const element of [item.node, node]) {
+      const style = attr(element, "style");
+      if (style && style !== (element === item.node ? "white-space:pre;overflow-x:auto" : "display:block;white-space:pre;padding:0;background:transparent;font-family:monospace")) throw new Error("代码容器含未知样式，未迁移。");
+    }
+    return { from: item.from, to: item.to, code, lang, ranges: styleRanges(flat.styles), positions: flat.units.map(({ from, to }) => ({ from, to })) };
+  });
+}
+
 /** Live Preview HTML widget 没有 postprocessor section 时，以 CM 提供的源锚点定位。 */
 export function mapRenderedCodeAtPosition(text: string, position: number, rendered: string, from: number, to: number): { from: number; to: number } {
   if (!Number.isInteger(position) || position < 0 || position > text.length) throw new Error("代码源锚点无效。");
@@ -541,12 +563,17 @@ function rejectUnknown(model: Model, from: number, to: number): void {
   if (protectedRange) throw new Error(`选区包含尚不支持着色的${protectedRange.kind}扩展语法，未改动正文。`);
 }
 
-function frontmatterEnd(text: string): number {
+export function frontmatterEnd(text: string): number {
   // 仅文档第一行开启 YAML；未闭合时保护至全文末尾，不猜测属性范围。
   const yamlOpen = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\r|\n|$)/.exec(text);
   if (!yamlOpen) return 0;
   const close = /^(?:---|\.\.\.)[ \t]*(?:\r\n|\r|\n|$)/m.exec(text.slice(yamlOpen[0].length));
   return close ? yamlOpen[0].length + close.index + close[0].length : text.length;
+}
+
+/** 共用扩展语法边界，避免原生代码颜色绕过 YAML、注释、公式和高亮保护。 */
+export function markdownProtectedRanges(text: string): Array<{ from: number; to: number; kind: string }> {
+  return buildModel(text, []).protected;
 }
 
 /** 仅作为已完整解析文档上的安全护栏，不尝试把未知 Obsidian 扩展当作普通文本重写。 */
