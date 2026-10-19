@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {EditorState,EditorSelection,Transaction} from '@codemirror/state';
+import {EditorState,EditorSelection,Transaction,StateField,StateEffect} from '@codemirror/state';
 import {history,undo,redo,deleteCharBackward,deleteCharForward} from '@codemirror/commands';
 import {EditorView} from '@codemirror/view';
 import {Window} from 'happy-dom';
@@ -194,4 +194,73 @@ test('directly adjacent colored code islands fail closed when native delimiters 
  const source='before '+code('arr')+code('brr')+' after';
  assert.throws(()=>migrateOwnedTextToNative(source),/改变可见文字/);
  assert.equal(source,'before '+code('arr')+code('brr')+' after');
+});
+
+
+test('metadata schema rejects malformed, noncanonical and overlapping ranges without discarding records',()=>{
+ const range={from:0,to:1,property:'background',color:bg};
+ for(const ranges of [null,[null],[{...range,extra:true}],[{...range,property:'border'}],[{...range,color:'red'}],[{...range,color:42}],[{...range,from:-1}],[{...range,to:0}],[{...range,from:0.5}],[range,range]]) {
+  assert.throws(()=>encodeNativeTextMetadata('alpha',ranges),/范围无效/);
+ }
+ assert.throws(()=>encodeNativeTextMetadata('a'.repeat(200001),[]),/超限/);
+ assert.throws(()=>encodeNativeTextMetadata('a',Array(10001).fill(range)),/超限/);
+ assert.throws(()=>encodeNativeTextMetadata('a\r\nb',[{...range,from:2,to:4}]),/范围无效/);
+ assert.throws(()=>encodeNativeTextMetadata('😀',[{...range,to:1}]),/范围无效/);
+ assert.ok(encodeNativeTextMetadata('',[]).includes('"source":""'));
+ const valid=encodeNativeTextMetadata('alpha',[range]);
+ for(const raw of [valid.replace(':1 ',':2 '),valid.replace('{"version":1','{ "version":1'),valid.replace('"source":"alpha"','"source":42'),valid.replace('"ranges":','"extra":true,"ranges":'),'<!-- noteglow-text-colors:1 null -->','<!-- noteglow-text-colors:1 {broken} -->']) {
+  const text='alpha\n\n'+raw;assert.equal(scanNativeText(text)[0].status,'invalid');
+  assert.deepEqual(nativeTextColorRanges(text),[]);assert.throws(()=>applyNativeTextColor(text,0,1,'background',bg),/重置/);
+  assert.equal(resetNativeTextMetadata(text),'alpha');
+ }
+});
+
+test('selection ownership rejects cross-block, metadata and syntax-only selections',()=>{
+ const source=paint('alpha\n\nbeta','alpha').text;
+ for(const [from,to] of [[-1,1],[0,0],[0,source.length+1],[0,source.length],[source.indexOf('<!--'),source.indexOf('<!--')+4]]) assert.throws(()=>applyNativeTextColor(source,from,to,'background',bg));
+ assert.throws(()=>applyNativeTextColor('**alpha**',0,2,'background',bg),/格式标签/);
+ assert.throws(()=>applyNativeTextColor('alpha',0,1,'background'),/#RGB/);
+ assert.throws(()=>applyNativeTextColor('alpha',0,1,'foreground','invalid'),/#RGB/);
+ assert.deepEqual(scanNativeText('a'.repeat(1000001)),[]);
+ assert.throws(()=>applyNativeTextColor('a'.repeat(1000001),0,1,'background',bg),/过大/);
+ assert.deepEqual(scanNativeText('```go\nunclosed'),[]);
+ assert.equal(applyNativeTextColor('alpha',0,5).text,'alpha','clearing an uncolored block is a no-op');
+ const bold=formatNativeText('alpha',0,5,'bold');assert.equal(bold.text,'**alpha**');assert.equal(bold.text.includes('noteglow-text-colors'),false);
+});
+
+test('editing metadata itself or mixing metadata and prose never silently repairs user changes',()=>{
+ const source=paint('alpha\n\nafter','alpha').text,block=scanNativeText(source)[0];
+ const h=harness(source);
+ h.edit([{from:1,insert:'X'},{from:block.commentFrom+5,insert:'!'}]);
+ assert.ok(h.text.startsWith('aXlpha'));assert.ok(h.text.includes('<!-- !noteglow-text-colors:'));
+ assert.ok(!scanNativeText(h.text).some(item=>item.status==='valid'));
+ const corrupt=harness(source);const at=source.indexOf('"version":1')+'"version":'.length;
+ corrupt.edit({from:at,to:at+1,insert:'2'});assert.equal(scanNativeText(corrupt.text)[0].status,'invalid');assert.ok(corrupt.text.includes('"version":2'));
+ const outside=harness(source);outside.edit({from:source.length,insert:'!'});assert.equal(scanNativeText(outside.text)[0].status,'valid');assert.equal(scanNativeText(outside.text)[0].source,'alpha');
+ const list=paint('- alpha\n- beta','alpha').text,indentation=harness(list);indentation.edit({from:list.indexOf('- beta'),insert:'  '},'indent');
+ assert.ok(!scanNativeText(indentation.text).some(item=>item.status==='valid'),'container indentation changes fail closed');
+});
+
+test('Live Preview mode toggle changes only decorations and read-only commands preserve source',()=>{
+ const mode=StateEffect.define(),live=StateField.define({create:()=>true,update:(value,tr)=>tr.effects.reduce((current,effect)=>effect.is(mode)?effect.value:current,value)});
+ const field=createNativeTextMetadataField(state=>state.field(live));
+ const source=paint('alpha','alpha').text;
+ let state=EditorState.create({doc:source,extensions:[live,field,EditorState.readOnly.of(true)]});
+ assert.equal(state.field(field).size,1);
+ state=state.update({effects:mode.of(false)}).state;assert.equal(state.field(field).size,0);assert.equal(state.doc.toString(),source);
+ state=state.update({effects:mode.of(true)}).state;assert.equal(state.field(field).size,1);
+ const readonly={state,dispatch(){assert.fail('read-only command dispatched a write');}};
+ assert.equal(deleteCharBackward(readonly),false);assert.equal(deleteCharForward(readonly),false);
+ const stale=source.replace('alpha\n','changed\n');const staleState=EditorState.create({doc:stale,extensions:[live,field]});assert.equal(staleState.field(field).size,1);
+ const invalidState=EditorState.create({doc:source.replace('"version":1','"version":2'),extensions:[live,field]});assert.equal(invalidState.field(field).size,0,'corrupt records remain visible for recovery');
+});
+
+test('migration refuses mixed legacy/native ownership and preserves identity mapping when already native',()=>{
+ const native=paint('alpha','alpha').text;
+ const identity=migrateOwnedTextToNative(native);assert.equal(identity.count,0);assert.equal(identity.map(native.length),native.length);
+ const old='<span data-codex-color="1" style="color:#c0392b">beta</span>';
+ assert.throws(()=>migrateOwnedTextToNative(native+'\n\n'+old),/同时包含/);
+ const plainCode='before <code data-codex-code="1">value</code> after';
+ const restored=migrateOwnedTextToNative(plainCode);assert.equal(restored.text,'before `value` after');assert.equal(restored.count,1);assert.equal(restored.text.includes('noteglow-text-colors'),false);
+ const misplaced='alpha\n\n\n'+encodeNativeTextMetadata('alpha',[]);assert.equal(scanNativeText(misplaced)[0].status,'none');assert.deepEqual(nativeTextColorRanges(misplaced),[]);
 });
