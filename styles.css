@@ -24,6 +24,8 @@
 .codex-notes-message.is-user .codex-notes-message-body { background: var(--interactive-accent); color: var(--text-on-accent); white-space: pre-wrap; }
 .codex-notes-message.is-assistant .codex-notes-message-body { background: var(--background-secondary); }
 .codex-notes-message.is-system .codex-notes-message-body { border: 1px solid var(--background-modifier-error); color: var(--text-error); background: var(--background-modifier-error-hover); white-space: pre-wrap; }
+/* Obsidian 默认禁止界面选字；只在消息正文恢复原生拖选和复制，保留按钮自身的交互规则。 */
+.codex-notes-message-body { -webkit-user-select: text; user-select: text; }
 .codex-notes-message-body > :first-child { margin-top: 0; }
 .codex-notes-message-body > :last-child { margin-bottom: 0; }
 .codex-notes-composer { flex-shrink: 0; padding: 8px 10px 10px; border-top: 1px solid var(--background-modifier-border); background: var(--background-primary); }
