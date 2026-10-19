@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {EditorState,EditorSelection,Transaction,StateField,StateEffect} from '@codemirror/state';
-import {history,undo,redo,deleteCharBackward,deleteCharForward} from '@codemirror/commands';
+import {history,undo,redo,isolateHistory,deleteCharBackward,deleteCharForward} from '@codemirror/commands';
 import {EditorView} from '@codemirror/view';
 import {Window} from 'happy-dom';
 import {applyNativeTextColor,formatNativeText,scanNativeText,nativeTextColorRanges,nativeTextColorTransactions,migrateOwnedTextToNative,resetNativeTextMetadata,encodeNativeTextMetadata,createNativeTextMetadataField} from '../src/native-text-colors.ts';
-import {applyNativeCodeColor,nativeCodeColorTransactions,scanNativeCode} from '../src/native-code-colors.ts';
+import {applyNativeCodeColor,nativeCodeColorTransactions,scanNativeCode,minimalTextChange} from '../src/native-code-colors.ts';
 import {applyMarkdownColor,nativeTextDocumentShape,restoreOwnedInline,projectNativeMarkdown} from '../src/markdown-colors.ts';
 import {alignRenderedText} from '../src/color-ranges.ts';
 const bg='#fff88f',fg='#c0392b';
@@ -263,4 +263,92 @@ test('migration refuses mixed legacy/native ownership and preserves identity map
  const plainCode='before <code data-codex-code="1">value</code> after';
  const restored=migrateOwnedTextToNative(plainCode);assert.equal(restored.text,'before `value` after');assert.equal(restored.count,1);assert.equal(restored.text.includes('noteglow-text-colors'),false);
  const misplaced='alpha\n\n\n'+encodeNativeTextMetadata('alpha',[]);assert.equal(scanNativeText(misplaced)[0].status,'none');assert.deepEqual(nativeTextColorRanges(misplaced),[]);
+});
+
+
+// 功能矩阵：每种格式 × 先着色/后着色；按公开纯函数重走命令路径，不用源码正则代替行为。
+test('bold italic and inline code independently toggle with both colors before or after formatting',()=>{
+ const source='- alpha beta';
+ for(const format of ['bold','italic','code']) for(const colorFirst of [false,true]) {
+  let text=source;
+  const colors=()=>{for(const [property,color] of [['foreground',fg],['background',bg]])text=paint(text,'alpha',property,color).text;};
+  const toggle=()=>{const at=text.indexOf('alpha');text=formatNativeText(text,at,at+5,format).text;};
+  if(colorFirst)colors();toggle();if(!colorFirst)colors();
+  const reopened=JSON.parse(JSON.stringify(text));const block=scanNativeText(reopened)[0];
+  assert.equal(block.status,'valid');assert.equal(block.ranges.length,2);
+  for(const range of block.ranges)assert.equal(block.source.slice(range.from,range.to),'alpha');
+  assert.ok(!reopened.includes('<span'));assert.ok(!reopened.includes('<code'));
+  toggle();assert.equal(scanNativeText(text)[0].source,source,'cancel format preserves native text');
+  assert.equal(nativeTextColorRanges(text).length,2,'cancel format preserves both colors');
+  const at=text.indexOf('alpha');text=applyNativeTextColor(text,at,at+5).text;
+  assert.equal(text,source,'clear removes only color record after format cancellation');
+ }
+});
+
+test('bold plus italic nesting can be independently cancelled without losing colors',()=>{
+ for(const order of [['bold','italic'],['italic','bold']]) {
+  let text=paint(paint('- alpha beta','alpha','foreground',fg).text,'alpha').text;
+  const toggle=format=>{const at=text.indexOf('alpha');text=formatNativeText(text,at,at+5,format).text;};
+  for(const format of order)toggle(format);
+  assert.equal(projectNativeMarkdown(scanNativeText(text)[0].source).text,'alpha beta');
+  assert.equal(scanNativeText(text)[0].ranges.length,2);
+  toggle(order[0]);assert.equal(scanNativeText(text)[0].ranges.length,2);
+  toggle(order[1]);assert.equal(scanNativeText(text)[0].source,'- alpha beta');
+  assert.deepEqual(nativeTextColorRanges(text).map(range=>text.slice(range.from,range.to)),['alpha','alpha']);
+ }
+});
+
+test('native inline code inside bold is reversible; incompatible and partial-code operations refuse unchanged',()=>{
+ let text=paint('**alpha** and beta','alpha').text;
+ let at=text.indexOf('alpha');text=formatNativeText(text,at,at+5,'code').text;
+ assert.equal(scanNativeText(text)[0].source,'**`alpha`** and beta');
+ assert.equal(scanNativeText(text)[0].ranges.length,1);
+ at=text.indexOf('alpha');
+ for(const format of ['bold','italic'])assert.throws(()=>formatNativeText(text,at,at+5,format),/先取消代码/);
+ assert.throws(()=>formatNativeText(text,at+1,at+4,'code'),/完整/);
+ const cancelled=formatNativeText(text,at,at+5,'code');assert.equal(scanNativeText(cancelled.text)[0].source,'**alpha** and beta');
+ assert.equal(nativeTextColorRanges(cancelled.text).map(range=>cancelled.text.slice(range.from,range.to)).join(''),'alpha');
+});
+
+test('clear one word preserves bold italic code and neighboring foreground/background colors',()=>{
+ let text='- **alpha** *beta* `gamma`';
+ for(const word of ['alpha','beta','gamma'])for(const [property,color] of [['foreground',fg],['background',bg]])text=paint(text,word,property,color).text;
+ const at=text.indexOf('beta'),cleared=applyNativeTextColor(text,at,at+4).text;
+ assert.equal(scanNativeText(cleared)[0].source,'- **alpha** *beta* `gamma`');
+ assert.deepEqual(nativeTextColorRanges(cleared).map(range=>cleared.slice(range.from,range.to)).sort(),['alpha','alpha','gamma','gamma']);
+ assert.equal(scanNativeText(JSON.parse(JSON.stringify(cleared)))[0].status,'valid');
+});
+
+test('each native format color cancellation transaction has exact Undo and Redo state',()=>{
+ let state=EditorState.create({doc:'- alpha beta',extensions:[history(),nativeTextColorTransactions,nativeCodeColorTransactions]});
+ const target={get state(){return state;},dispatch:tr=>{state=tr.state;}};
+ const snapshots=[state.doc.toString()];
+ const change=create=>{const before=state.doc.toString(),at=before.indexOf('alpha'),result=create(before,at);state=state.update({changes:minimalTextChange(before,result.text),selection:{anchor:result.from,head:result.to},annotations:[isolateHistory.of('full'),Transaction.userEvent.of('input')]}).state;snapshots.push(state.doc.toString());assert.equal(state.doc.toString(),result.text);};
+ change((text,at)=>formatNativeText(text,at,at+5,'bold'));
+ change((text,at)=>formatNativeText(text,at,at+5,'italic'));
+ change((text,at)=>applyNativeTextColor(text,at,at+5,'foreground',fg));
+ change((text,at)=>applyNativeTextColor(text,at,at+5,'background',bg));
+ change((text,at)=>formatNativeText(text,at,at+5,'italic'));
+ change((text,at)=>formatNativeText(text,at,at+5,'code'));
+ change((text,at)=>formatNativeText(text,at,at+5,'code'));
+ change((text,at)=>applyNativeTextColor(text,at,at+5));
+ for(let i=snapshots.length-2;i>=0;i--){assert.equal(undo(target),true);assert.equal(state.doc.toString(),snapshots[i]);}
+ for(let i=1;i<snapshots.length;i++){assert.equal(redo(target),true);assert.equal(state.doc.toString(),snapshots[i]);}
+});
+
+test('public native entrypoints reject owned legacy HTML instead of producing new HTML',()=>{
+ const old=applyMarkdownColor('alpha',0,5,'background',bg).text,at=old.indexOf('alpha');
+ assert.throws(()=>applyNativeTextColor(old,at,at+5,'foreground',fg),/旧 HTML/);
+ for(const format of ['bold','italic','code'])assert.throws(()=>formatNativeText(old,at,at+5,format),/旧 HTML/);
+ assert.ok(old.includes('<span data-codex-color'));
+});
+
+
+test('cancelling outer italic preserves nested bold while partial selection never removes whole wrapper',()=>{
+ const source=paint('***alpha***','alpha').text,at=source.indexOf('alpha');
+ const cancelled=formatNativeText(source,at,at+5,'italic');assert.equal(scanNativeText(cancelled.text)[0].source,'**alpha**');
+ const partial=formatNativeText(source,at+1,at+4,'italic');
+ assert.notEqual(scanNativeText(partial.text)[0].source,'**alpha**');
+ assert.equal(projectNativeMarkdown(scanNativeText(partial.text)[0].source).text,'alpha');
+ assert.deepEqual(nativeTextColorRanges(cancelled.text).map(range=>cancelled.text.slice(range.from,range.to)),['alpha']);
 });

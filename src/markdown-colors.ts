@@ -633,7 +633,13 @@ function findExactFormat(node: MdNode, from: number, to: number, wanted: string)
   let result: MdNode | null = null;
   walkMd(node, (candidate) => {
     if (candidate.type !== wanted || !candidate.children?.length) return;
-    const outer = position(candidate), innerFrom = position(candidate.children[0]).from, innerTo = position(candidate.children[candidate.children.length - 1]).to;
+    const outer = position(candidate);
+    // 选中文字通常不含嵌套格式符。只穿透透明格式层判断是否完整选中，不能穿透链接/代码。
+    // 真正移除时仍用调用方的直接子节点边界，保留另外一层加粗/斜体及其颜色。
+    let first = candidate.children[0], last = candidate.children[candidate.children.length - 1];
+    while (["strong", "emphasis", "delete"].includes(first.type) && first.children?.length) first = first.children[0];
+    while (["strong", "emphasis", "delete"].includes(last.type) && last.children?.length) last = last.children[last.children.length - 1];
+    const innerFrom = position(first).from, innerTo = position(last).to;
     if (from >= outer.from && from <= innerFrom && to >= innerTo && to <= outer.to) result = candidate;
   });
   return result;

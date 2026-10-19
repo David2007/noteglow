@@ -2,6 +2,8 @@ import { readFile, writeFile, mkdir, rename, realpath, stat } from "node:fs/prom
 import { resolve, join, dirname, relative, sep } from "node:path";
 import { createHash } from "node:crypto";
 import { migrateMarkdownColors } from "../src/markdown-colors.ts";
+import { migrateOwnedCodeToNative } from "../src/native-code-colors.ts";
+import { migrateOwnedTextToNative } from "../src/native-text-colors.ts";
 import { parseNoteColors } from "../src/color-ranges.ts";
 
 // 默认仅生成计划；--apply 只适用于已退出 Obsidian 的本地 Vault。
@@ -30,10 +32,11 @@ for (const [path, note] of Object.entries(validated.notes)) {
   const result = migrateMarkdownColors(note.text, note.ranges);
   const before = await readFile(filename);
   const snapshot = Buffer.from(note.text);
-  const after = Buffer.from(result.text);
-  // 上轮可能已写正文、尚未提交 sidecar 就中断；只有精确等于预期结果才允许收尾。
+  const legacyAfter = Buffer.from(result.text);
+  const after = Buffer.from(migrateOwnedTextToNative(migrateOwnedCodeToNative(result.text)).text);
+  // 兼容上一版已写 HTML、尚未提交 sidecar 的中断；仅接受快照、旧精确 HTML 或最终原生结果。
   // 其他修改绝不猜 offset 或覆盖，避免把用户在失败后的新编辑当成迁移中间态。
-  if (!before.equals(snapshot) && !before.equals(after)) throw new Error(`正文既不等于颜色快照，也不等于可证明的迁移结果，未写入任何文件：${path}`);
+  if (!before.equals(snapshot) && !before.equals(legacyAfter) && !before.equals(after)) throw new Error(`正文既不等于颜色快照，也不等于可证明的迁移结果，未写入任何文件：${path}`);
   plans.push({ path, filename, before, snapshot, after, recovered: !before.equals(snapshot), mode: (await stat(filename)).mode & 0o777 });
 }
 const summary = plans.map(({ path, before, snapshot, after, recovered }) => ({ path, beforeSha256: hash(snapshot), observedSha256: hash(before), afterSha256: hash(after), changed: !before.equals(after), recovered }));
