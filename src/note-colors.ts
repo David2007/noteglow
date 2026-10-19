@@ -1,9 +1,10 @@
-import { editorInfoField, MarkdownRenderChild, MarkdownView, Modal, Notice, normalizePath, Plugin, TFile, type Editor, type MarkdownPostProcessorContext } from "obsidian";
+import { editorInfoField, MarkdownRenderChild, MarkdownView, Notice, normalizePath, Plugin, TFile, type Editor, type MarkdownPostProcessorContext } from "obsidian";
 import { StateEffect } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { alignRenderedText, mapColorRanges, normalizeColor, parseLastColors, parseNoteColors, projectMarkdown, relocateColorRanges, type ColoredNote, type ColorProperty, type ColorRange, type NoteColorsData } from "./color-ranges";
 import { applyMarkdownColor, formatMarkdownSelection, mapRenderedCodeAtPosition, mapRenderedCodeSelection, type PortableColorEdit } from "./markdown-colors";
 import { readCodeDomSelection } from "./rendered-code-selection";
+import { createColorPicker } from "./color-picker";
 
 const refreshColors = StateEffect.define<void>();
 interface WriteChannel { queue: Promise<void> }
@@ -45,6 +46,7 @@ class NoteColorController {
   private readonly applyingPaths = new Set<string>();
   private readonly renderedCode = new WeakMap<HTMLElement, { path: string; text: string; from: number; to: number }>();
   private codeToolbar: HTMLElement | null = null;
+  private colorPicker: { close(): void } | null = null;
 
   constructor(private readonly plugin: Plugin) {
     this.filename = normalizePath(`${plugin.manifest.dir ?? `${plugin.app.vault.configDir}/plugins/${plugin.manifest.id}`}/note-colors.json`);
@@ -88,7 +90,7 @@ class NoteColorController {
       decorations: DecorationSet;
       constructor(readonly view: EditorView) { owner.editors.add(view); this.decorations = owner.decorations(view); }
       update(update: ViewUpdate): void {
-        if (update.docChanged) { owner.hideCodeToolbar(); owner.scheduleRefresh(); }
+        if (update.docChanged) { owner.hideCodeToolbar(); owner.closeColorPicker(); owner.scheduleRefresh(); }
         const path = editorPath(update.view);
         const previousPath = update.startState.field(editorInfoField, false)?.file?.path;
         if (update.docChanged && path && path === previousPath) owner.documentChanged(path, update.startState.doc.toString(), update.state.doc.toString(), (position, association) => update.changes.mapPos(position, association), update.transactions.some((transaction) => transaction.isUserEvent("undo") || transaction.isUserEvent("redo")));
@@ -110,10 +112,10 @@ class NoteColorController {
     }, 100);
 
     plugin.registerDomEvent(document, "selectionchange", () => owner.showCodeToolbar());
-    plugin.registerDomEvent(document, "scroll", () => owner.hideCodeToolbar(), true);
-    plugin.registerDomEvent(window, "resize", () => owner.hideCodeToolbar());
+    plugin.registerDomEvent(document, "scroll", () => { owner.hideCodeToolbar(); owner.closeColorPicker(); }, true);
+    plugin.registerDomEvent(window, "resize", () => { owner.hideCodeToolbar(); owner.closeColorPicker(); });
     plugin.registerDomEvent(document, "keydown", (event) => { if (event.key === "Escape") owner.hideCodeToolbar(); });
-    plugin.registerEvent(plugin.app.workspace.on("active-leaf-change", () => owner.hideCodeToolbar()));
+    plugin.registerEvent(plugin.app.workspace.on("active-leaf-change", () => { owner.hideCodeToolbar(); owner.closeColorPicker(); }));
 
     for (const [id, name, property, picker] of [
       ["change-font-color", "字体颜色", "foreground", false],
@@ -126,7 +128,7 @@ class NoteColorController {
         if (!(info instanceof MarkdownView)) { new Notice("请在笔记编辑视图中选择文字。"); return; }
         const selection = owner.captureSelection(editor, info);
         if (!selection) return;
-        if (property && picker) new ColorPickerModal(owner, plugin, selection, property).open();
+        if (property && picker) owner.openColorPicker(selection, property);
         else void owner.apply(selection, property, property ? owner.lastColor(property) : undefined).catch((error: unknown) => new Notice(errorText(error), 8000));
       } });
     }
@@ -168,7 +170,7 @@ class NoteColorController {
     }));
     const style = document.createElement("style");
     style.dataset.codexNoteColors = plugin.manifest.id;
-    style.textContent = ".codex-notes-color-foreground,.codex-notes-color-foreground *{color:var(--codex-note-foreground)!important}.codex-notes-color-background{background-color:var(--codex-note-background)!important;border-radius:2px}.codex-notes-color-picker{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.codex-notes-color-swatch{width:32px;height:32px;border:1px solid var(--background-modifier-border);padding:0}.codex-notes-color-custom{width:100%;max-width:240px}.codex-notes-color-description{color:var(--text-muted);font-size:var(--font-ui-small);line-height:1.6}.codex-notes-color-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}";
+    style.textContent = ".codex-notes-color-foreground,.codex-notes-color-foreground *{color:var(--codex-note-foreground)!important}.codex-notes-color-background{background-color:var(--codex-note-background)!important;border-radius:2px}";
     document.head.appendChild(style);
     // 只通过可卸载 stylesheet 发布色条变量，不写 document/body 的持久 inline style。
     this.lastColorStyle = document.createElement("style");
@@ -177,7 +179,7 @@ class NoteColorController {
     document.head.appendChild(this.lastColorStyle);
     plugin.register(() => {
       this.disposed = true;
-      this.hideCodeToolbar();
+      this.hideCodeToolbar(); this.closeColorPicker();
       if (this.saveTimer) clearTimeout(this.saveTimer);
       if (this.refreshTimer) clearTimeout(this.refreshTimer);
       for (const reader of this.readers) reader.unload();
@@ -190,6 +192,30 @@ class NoteColorController {
   }
 
   private hideCodeToolbar(): void { this.codeToolbar?.remove(); this.codeToolbar = null; }
+
+  private closeColorPicker(): void { this.colorPicker?.close(); this.colorPicker = null; }
+
+  private openColorPicker(selection: ColorSelection, property: ColorProperty, anchor?: { left: number; top: number; bottom: number }): void {
+    this.closeColorPicker(); this.hideCodeToolbar();
+    if (!anchor) {
+      const editor = Array.from(this.editors).find((item) => selection.view.containerEl.contains(item.dom) && editorPath(item) === selection.path && item.state.doc.toString() === selection.text);
+      anchor = editor?.coordsAtPos(selection.to) ?? selection.view.containerEl.getBoundingClientRect();
+    }
+    this.colorPicker = createColorPicker({
+      document: selection.view.containerEl.ownerDocument,
+      anchor,
+      label: property === "foreground" ? "字体颜色" : "背景颜色",
+      colors: property === "foreground" ? foregroundColors : backgroundColors,
+      initialColor: this.lastColor(property),
+      apply: (color) => this.apply(selection, property, color),
+      // 写入事务会关闭旧选区浮层；其后保存失败仍须提醒，不能吞掉失败。
+      failedAfterClose: (error) => new Notice(errorText(error), 8000),
+      cancelledByEscape: () => {
+        if (selection.view.containerEl.isConnected && selection.view.file?.path === selection.path && selection.view.getMode() === "source" && this.plugin.app.workspace.getActiveViewOfType(MarkdownView) === selection.view) selection.view.editor.focus();
+      },
+      closed: () => { this.colorPicker = null; }
+    });
+  }
 
   /** section 快照在渲染时绑定；相同代码重复出现也只使用当前 section 的绝对位置。 */
   bindRenderedCode(el: HTMLElement, context: MarkdownPostProcessorContext): void {
@@ -210,7 +236,7 @@ class NoteColorController {
   }
 
   private showCodeToolbar(): void {
-    if (this.codeToolbar?.contains(document.activeElement)) return;
+    if (this.colorPicker || this.codeToolbar?.contains(document.activeElement)) return;
     this.hideCodeToolbar();
     if (!this.enabled || this.disposed) return;
     const selection = document.getSelection();
@@ -246,8 +272,9 @@ class NoteColorController {
     for (const [label, property, picker] of [["字体色", "foreground", false], ["更换字体色", "foreground", true], ["背景色", "background", false], ["更换背景色", "background", true], ["清除颜色", undefined, false]] as const) {
       const button = document.createElement("button"); button.textContent = label; button.title = label; toolbar.appendChild(button);
       button.addEventListener("click", () => {
+        const anchor = button.getBoundingClientRect();
         this.hideCodeToolbar();
-        if (property && picker) new ColorPickerModal(this, this.plugin, captured, property).open();
+        if (property && picker) this.openColorPicker(captured, property, anchor);
         else void this.apply(captured, property, property ? this.lastColor(property) : undefined).catch((error: unknown) => new Notice(errorText(error), 8000));
       });
     }
@@ -559,36 +586,6 @@ class ColoredSection extends MarkdownRenderChild {
     }
   }
   private hasCode(): boolean { return this.containerEl.matches("pre,code") || Boolean(this.containerEl.querySelector("pre,code")); }
-}
-
-class ColorPickerModal extends Modal {
-  constructor(private readonly colorController: NoteColorController, plugin: Plugin, private readonly colorSelection: ColorSelection, private readonly colorProperty: ColorProperty) { super(plugin.app); }
-  onOpen(): void {
-    this.setTitle(this.colorProperty === "foreground" ? "设置字体颜色" : "设置背景颜色");
-    this.contentEl.createEl("p", { cls: "codex-notes-color-description", text: "颜色直接保存在 Markdown 中，保留列表、加粗和链接结构；着色代码转换为 HTML 代码，保留代码文字和缩进。同类颜色以最后一次为准。" });
-    const palette = this.contentEl.createDiv({ cls: "codex-notes-color-picker" });
-    const input = this.contentEl.createEl("input", { cls: "codex-notes-color-custom", type: "text", value: this.colorController.lastColor(this.colorProperty), attr: { "aria-label": "自定义颜色", maxlength: "7", placeholder: "#fff88f" } });
-    this.contentEl.createEl("p", { cls: "codex-notes-color-description", text: "单个颜色值，支持 #RGB 或 #RRGGBB，例如 #fff88f；点击应用时校验，无效颜色整体拒绝。" });
-    for (const color of this.colorProperty === "foreground" ? foregroundColors : backgroundColors) {
-      const button = palette.createEl("button", { cls: "codex-notes-color-swatch", attr: { "aria-label": `选择颜色 ${color}`, title: color } });
-      button.style.backgroundColor = color;
-      button.addEventListener("click", () => { input.value = color; });
-    }
-    const actions = this.contentEl.createDiv({ cls: "codex-notes-color-actions" });
-    actions.createEl("button", { text: "取消" }).addEventListener("click", () => this.close());
-    const apply = actions.createEl("button", { text: "应用", cls: "mod-cta" });
-    apply.addEventListener("click", () => {
-      const color = normalizeColor(input.value);
-      if (!color) { new Notice("颜色须为 #RGB 或 #RRGGBB，例如 #fff88f。"); input.focus(); return; }
-      apply.disabled = true;
-      void this.colorController.apply(this.colorSelection, this.colorProperty, color).then(() => {
-        this.close();
-        // Modal 关闭会恢复到原调色按钮，再把焦点交回仍打开的来源编辑器。
-        if (this.colorSelection.view.file?.path === this.colorSelection.path && this.colorSelection.view.getMode() === "source") this.colorSelection.view.editor.focus();
-      }).catch((error: unknown) => { apply.disabled = false; new Notice(errorText(error), 8000); });
-    });
-  }
-  onClose(): void { this.contentEl.empty(); }
 }
 
 function editorPath(view: EditorView): string | undefined { return view.state.field(editorInfoField, false)?.file?.path; }
