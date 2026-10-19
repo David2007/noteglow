@@ -2,10 +2,11 @@ import { editorInfoField, editorLivePreviewField, MarkdownRenderChild, MarkdownV
 import { StateEffect } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { alignRenderedText, mapColorRanges, normalizeColor, parseLastColors, parseNoteColors, projectMarkdown, relocateColorRanges, type ColoredNote, type ColorProperty, type ColorRange, type NoteColorsData } from "./color-ranges";
-import { applyMarkdownColor, formatMarkdownSelection, mapRenderedCodeAtPosition, mapRenderedCodeSelection, decodeOwnedCodeBlocks, type PortableColorEdit } from "./markdown-colors";
+import { projectNativeMarkdown, mapRenderedCodeAtPosition, mapRenderedCodeSelection, decodeOwnedCodeBlocks, type PortableColorEdit } from "./markdown-colors";
 import { readCodeDomSelection } from "./rendered-code-selection";
 import { createColorPicker } from "./color-picker";
 import { applyNativeCodeColor, backupNativeCodeMigration, createNativeMetadataField, mapMigratedCodePosition, migrateOwnedCodeToNative, minimalTextChange, nativeCodeColorTransactions, paintNativeCodeElement, scanNativeCode } from "./native-code-colors";
+import { applyNativeTextColor, formatNativeText, migrateOwnedTextToNative, nativeTextColorRanges, nativeTextColorTransactions, createNativeTextMetadataField, resetNativeTextMetadata } from "./native-text-colors";
 
 const refreshColors = StateEffect.define<void>();
 interface WriteChannel { queue: Promise<void> }
@@ -88,6 +89,8 @@ class NoteColorController {
     const plugin = this.plugin;
     const owner = this;
     plugin.registerEditorExtension(nativeCodeColorTransactions);
+    plugin.registerEditorExtension(nativeTextColorTransactions);
+    plugin.registerEditorExtension(createNativeTextMetadataField((state) => state.field(editorLivePreviewField, false) === true));
     plugin.registerEditorExtension(createNativeMetadataField((state) => state.field(editorLivePreviewField, false) === true));
     plugin.registerEditorExtension(ViewPlugin.fromClass(class {
       decorations: DecorationSet;
@@ -120,6 +123,14 @@ class NoteColorController {
     plugin.registerDomEvent(window, "resize", () => { owner.hideCodeToolbar(); owner.closeColorPicker(); });
     plugin.registerDomEvent(document, "keydown", (event) => { if (event.key === "Escape") owner.hideCodeToolbar(); });
     plugin.registerEvent(plugin.app.workspace.on("active-leaf-change", () => { owner.hideCodeToolbar(); owner.closeColorPicker(); }));
+    plugin.addCommand({
+      id: "restore-native-text", name: "恢复当前笔记的原生正文与代码",
+      editorCallback: (_editor, info) => { if (info instanceof MarkdownView) void owner.restoreNativeText(info).catch((error: unknown) => new Notice(errorText(error), 10000)); }
+    });
+    plugin.addCommand({
+      id: "reset-native-text-colors", name: "重置当前笔记的正文颜色记录",
+      editorCallback: (_editor, info) => { if (info instanceof MarkdownView) void owner.restoreNativeText(info, true).catch((error: unknown) => new Notice(errorText(error), 10000)); }
+    });
     plugin.addCommand({ id: "restore-native-code-blocks", name: "恢复当前笔记的原生代码块", editorCallback: (_editor, info) => {
       if (!(info instanceof MarkdownView)) return;
       void owner.restoreNativeCode(info).catch((error: unknown) => new Notice(errorText(error), 10000));
@@ -305,7 +316,7 @@ class NoteColorController {
   }
 
   async apply(selection: ColorSelection, property?: ColorProperty, color?: string): Promise<void> {
-    await this.writeMarkdown(selection, () => applyNativeCodeColor(selection.text, selection.from, selection.to, property, color) ?? applyMarkdownColor(selection.text, selection.from, selection.to, property, color), property, color);
+    await this.writeMarkdown(selection, () => applyNativeCodeColor(selection.text, selection.from, selection.to, property, color) ?? applyNativeTextColor(selection.text, selection.from, selection.to, property, color), property, color);
   }
 
   private async restoreNativeCode(view: MarkdownView): Promise<void> {
@@ -320,8 +331,21 @@ class NoteColorController {
     new Notice(`已恢复 ${decodeOwnedCodeBlocks(text).length} 个原生代码块，跳过 0 个；备份：${backup}`, 10000);
   }
 
+  private async restoreNativeText(view: MarkdownView, reset = false): Promise<void> {
+    if (!view.file || view.getMode() !== "source") throw new Error("请在当前笔记编辑视图中执行恢复。");
+    const path = view.file.path, text = view.editor.getValue();
+    const from = view.editor.posToOffset(view.editor.getCursor("from")), to = view.editor.posToOffset(view.editor.getCursor("to"));
+    const code = reset ? text : migrateOwnedCodeToNative(text);
+    const migrated = reset ? { text: resetNativeTextMetadata(text), count: 0, map: (position: number) => Math.min(position, resetNativeTextMetadata(text).length) } : migrateOwnedTextToNative(code);
+    if (migrated.text === text) { new Notice(reset ? "没有需要重置的正文颜色记录。" : "没有需要恢复的旧正文或代码。"); return; }
+    const directory = this.filename.slice(0, this.filename.lastIndexOf("/")) + "/native-code-backups";
+    const backup = await backupNativeCodeMigration(this.plugin.app.vault.adapter, directory, `${Date.now()}-${crypto.randomUUID()}.md`, text, () => view.file?.path === path && view.editor.getValue() === text && view.containerEl.isConnected && !this.disposed);
+    await this.writeMarkdown({ path, text, from, to, editor: view.editor, view }, () => ({ text: migrated.text, from: migrated.map(reset ? from : mapMigratedCodePosition(text, code, from)), to: migrated.map(reset ? to : mapMigratedCodePosition(text, code, to)) }));
+    new Notice(reset ? `正文颜色记录已重置，正文保留；备份：${backup}` : `已恢复 ${migrated.count} 处正文/行内代码与 ${decodeOwnedCodeBlocks(text).length} 个代码块，跳过 0 处；备份：${backup}`, 10000);
+  }
+
   private async format(selection: ColorSelection, format: "bold" | "italic" | "code"): Promise<void> {
-    await this.writeMarkdown(selection, () => formatMarkdownSelection(selection.text, selection.from, selection.to, format));
+    await this.writeMarkdown(selection, () => formatNativeText(selection.text, selection.from, selection.to, format));
   }
 
   /** 颜色的事实来源是最终 Markdown。纯函数先完成所有核验，再进行一次可撤销编辑。 */
@@ -399,6 +423,7 @@ class NoteColorController {
     const note = path ? this.data.notes[path] : undefined;
     const text = view.state.doc.toString();
     const ranges = note ? (note.text === text ? [...note.ranges] : relocateColorRanges(note, text)) : [];
+    if (text.includes("<!-- noteglow-text-colors:")) ranges.push(...nativeTextColorRanges(text));
     if (text.includes("<!-- noteglow-code-colors:")) for (const block of scanNativeCode(text)) if (block.status === "valid") {
       ranges.push(...block.ranges.map((range) => ({ ...range, from: block.codeFrom + range.from, to: block.codeFrom + range.to })));
     }
@@ -516,7 +541,9 @@ class NoteColorController {
       const candidates = blocks.filter((block) => block.line === info.lineStart && block.status === "valid");
       if (candidates.length === 1) paintNativeCodeElement(code, candidates[0]);
     }
-    const note = this.data.notes[context.sourcePath];
+    const legacy = this.data.notes[context.sourcePath];
+    const nativeRanges = text.includes("<!-- noteglow-text-colors:") ? nativeTextColorRanges(text) : [];
+    const note = nativeRanges.length ? { text, ranges: [...(legacy?.text === text ? legacy.ranges : []), ...nativeRanges] } : legacy;
     const section = context.getSectionInfo(el);
     if (!note) { el.dataset.codexNoteColorStatus = "no-colors"; return; }
     if (!section) { el.dataset.codexNoteColorStatus = "no-source-section"; return; }
@@ -536,7 +563,7 @@ class NoteColorController {
       nodes.push(node);
     }
     const rendered = nodes.map((node) => node.data).join("");
-    const projection = projectMarkdown(source, start);
+    const projection = nativeRanges.length ? projectNativeMarkdown(source, start) : projectMarkdown(source, start);
     const alignment = alignRenderedText(projection, rendered);
     if (!alignment) { el.dataset.codexNoteColorStatus = `projection-mismatch:${projection.text.length}/${rendered.length}`; return; }
     el.dataset.codexNoteColorStatus = "applied";
