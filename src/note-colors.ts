@@ -2,7 +2,8 @@ import { editorInfoField, MarkdownRenderChild, MarkdownView, Modal, Notice, norm
 import { StateEffect } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { alignRenderedText, mapColorRanges, normalizeColor, parseLastColors, parseNoteColors, projectMarkdown, relocateColorRanges, type ColoredNote, type ColorProperty, type ColorRange, type NoteColorsData } from "./color-ranges";
-import { applyMarkdownColor, formatMarkdownSelection, type PortableColorEdit } from "./markdown-colors";
+import { applyMarkdownColor, formatMarkdownSelection, mapRenderedCodeAtPosition, mapRenderedCodeSelection, type PortableColorEdit } from "./markdown-colors";
+import { readCodeDomSelection } from "./rendered-code-selection";
 
 const refreshColors = StateEffect.define<void>();
 interface WriteChannel { queue: Promise<void> }
@@ -42,6 +43,8 @@ class NoteColorController {
   private lastColorStyle: HTMLStyleElement | null = null;
   private readonly preferenceSequence: Record<ColorProperty, number> = { foreground: 0, background: 0 };
   private readonly applyingPaths = new Set<string>();
+  private readonly renderedCode = new WeakMap<HTMLElement, { path: string; text: string; from: number; to: number }>();
+  private codeToolbar: HTMLElement | null = null;
 
   constructor(private readonly plugin: Plugin) {
     this.filename = normalizePath(`${plugin.manifest.dir ?? `${plugin.app.vault.configDir}/plugins/${plugin.manifest.id}`}/note-colors.json`);
@@ -85,6 +88,7 @@ class NoteColorController {
       decorations: DecorationSet;
       constructor(readonly view: EditorView) { owner.editors.add(view); this.decorations = owner.decorations(view); }
       update(update: ViewUpdate): void {
+        if (update.docChanged) { owner.hideCodeToolbar(); owner.scheduleRefresh(); }
         const path = editorPath(update.view);
         const previousPath = update.startState.field(editorInfoField, false)?.file?.path;
         if (update.docChanged && path && path === previousPath) owner.documentChanged(path, update.startState.doc.toString(), update.state.doc.toString(), (position, association) => update.changes.mapPos(position, association), update.transactions.some((transaction) => transaction.isUserEvent("undo") || transaction.isUserEvent("redo")));
@@ -95,6 +99,7 @@ class NoteColorController {
 
     plugin.registerMarkdownPostProcessor(async (el, context) => {
       if (!owner.enabled || owner.disposed) return;
+      owner.bindRenderedCode(el, context);
       const file = plugin.app.vault.getAbstractFileByPath(context.sourcePath);
       if (!(file instanceof TFile)) return;
       if (owner.data.notes[context.sourcePath]) {
@@ -103,6 +108,12 @@ class NoteColorController {
       if (owner.disposed) return;
       context.addChild(new ColoredSection(el, context, owner));
     }, 100);
+
+    plugin.registerDomEvent(document, "selectionchange", () => owner.showCodeToolbar());
+    plugin.registerDomEvent(document, "scroll", () => owner.hideCodeToolbar(), true);
+    plugin.registerDomEvent(window, "resize", () => owner.hideCodeToolbar());
+    plugin.registerDomEvent(document, "keydown", (event) => { if (event.key === "Escape") owner.hideCodeToolbar(); });
+    plugin.registerEvent(plugin.app.workspace.on("active-leaf-change", () => owner.hideCodeToolbar()));
 
     for (const [id, name, property, picker] of [
       ["change-font-color", "字体颜色", "foreground", false],
@@ -166,6 +177,7 @@ class NoteColorController {
     document.head.appendChild(this.lastColorStyle);
     plugin.register(() => {
       this.disposed = true;
+      this.hideCodeToolbar();
       if (this.saveTimer) clearTimeout(this.saveTimer);
       if (this.refreshTimer) clearTimeout(this.refreshTimer);
       for (const reader of this.readers) reader.unload();
@@ -175,6 +187,74 @@ class NoteColorController {
       if (this.enabled && this.dirty) void this.save(true).catch((error: unknown) => new Notice(`关闭时保存颜色记录失败：${errorText(error)}`, 8000));
       // 未开始的普通旧写取消；最后快照沿共用队列收尾，新实例 load 等待它完成。
     });
+  }
+
+  private hideCodeToolbar(): void { this.codeToolbar?.remove(); this.codeToolbar = null; }
+
+  /** section 快照在渲染时绑定；相同代码重复出现也只使用当前 section 的绝对位置。 */
+  bindRenderedCode(el: HTMLElement, context: MarkdownPostProcessorContext): void {
+    const blocks = el.matches('pre[data-codex-code="1"]') ? [el] : Array.from(el.querySelectorAll<HTMLElement>('pre[data-codex-code="1"]'));
+    const section = context.getSectionInfo(el);
+    if (!section) return;
+    // 同一文件可同时打开阅读和编辑窗格；只绑定承载此 DOM 的编辑窗格。
+    // 首次 postprocessor 尚未挂载时跳过，ColoredSection 挂载后的 refresh 会再次绑定。
+    const view = this.plugin.app.workspace.getLeavesOfType("markdown").map((leaf) => leaf.view).find((item): item is MarkdownView => item instanceof MarkdownView && item.file?.path === context.sourcePath && item.containerEl.contains(el));
+    if (!view || view.getMode() !== "source") return;
+    const text = view.editor.getValue(), lines = text.split("\n");
+    if (section.lineStart < 0 || section.lineEnd < section.lineStart || section.lineEnd >= lines.length) return;
+    const from = lines.slice(0, section.lineStart).reduce((sum, line) => sum + line.length + 1, 0);
+    const to = Math.min(text.length, lines.slice(0, section.lineEnd + 1).reduce((sum, line) => sum + line.length + 1, 0));
+    const source = text.slice(from, to);
+    if (section.text !== text && section.text !== source && section.text !== source.replace(/\n$/, "")) return;
+    for (const block of blocks) this.renderedCode.set(block, { path: context.sourcePath, text, from, to });
+  }
+
+  private showCodeToolbar(): void {
+    if (this.codeToolbar?.contains(document.activeElement)) return;
+    this.hideCodeToolbar();
+    if (!this.enabled || this.disposed) return;
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return;
+    const range = selection.getRangeAt(0);
+    const element = range.startContainer.nodeType === 1 ? range.startContainer as Element : range.startContainer.parentElement;
+    const code = element?.closest("code"), pre = code?.parentElement;
+    if (!code || !pre || !pre.matches('pre[data-codex-code="1"]')) return;
+    const binding = this.renderedCode.get(pre);
+    const view = this.plugin.app.workspace.getLeavesOfType("markdown").map((leaf) => leaf.view).find((item): item is MarkdownView => item instanceof MarkdownView && item.containerEl.contains(pre));
+    if (!view || view.getMode() !== "source" || !view.file) return;
+    const dom = readCodeDomSelection(code, range);
+    if (!dom) return;
+    let offsets: { from: number; to: number };
+    const text = view.editor.getValue();
+    try {
+      if (binding && binding.path === view.file.path && binding.text === text) offsets = mapRenderedCodeSelection(text, binding.from, binding.to, dom.text, dom.from, dom.to);
+      else {
+        // Live Preview 的 HTML widget 可能不经过 Markdown postprocessor。
+        // 只信任承载此 DOM 的 CM 编辑器及其源锚点，再核验整块解码文本，禁止按文本搜索。
+        const editor = Array.from(this.editors).find((item) => item.dom.contains(pre) && editorPath(item) === view.file?.path && item.state.doc.toString() === text);
+        if (!editor) return;
+        const position = editor.posAtDOM(pre);
+        offsets = mapRenderedCodeAtPosition(text, position, dom.text, dom.from, dom.to);
+      }
+    } catch { return; }
+    const captured: ColorSelection = { path: view.file.path, text, ...offsets, editor: view.editor, view };
+    const toolbar = document.createElement("div");
+    toolbar.className = "codex-notes-code-toolbar";
+    toolbar.setAttribute("role", "toolbar"); toolbar.setAttribute("aria-label", "NoteGlow 代码颜色");
+    // 保留原生选区；每次点击仍由 writeMarkdown 校验全文快照，过期选区不会写入。
+    toolbar.addEventListener("mousedown", (event) => event.preventDefault());
+    for (const [label, property, picker] of [["字体色", "foreground", false], ["更换字体色", "foreground", true], ["背景色", "background", false], ["更换背景色", "background", true], ["清除颜色", undefined, false]] as const) {
+      const button = document.createElement("button"); button.textContent = label; button.title = label; toolbar.appendChild(button);
+      button.addEventListener("click", () => {
+        this.hideCodeToolbar();
+        if (property && picker) new ColorPickerModal(this, this.plugin, captured, property).open();
+        else void this.apply(captured, property, property ? this.lastColor(property) : undefined).catch((error: unknown) => new Notice(errorText(error), 8000));
+      });
+    }
+    document.body.appendChild(toolbar); this.codeToolbar = toolbar;
+    const rect = range.getBoundingClientRect();
+    toolbar.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - toolbar.offsetWidth - 8))}px`;
+    toolbar.style.top = `${Math.max(8, rect.top - toolbar.offsetHeight - 8)}px`;
   }
 
   captureSelection(editor: Editor, view: MarkdownView): ColorSelection | null {
@@ -464,6 +544,7 @@ class ColoredSection extends MarkdownRenderChild {
     // Prism 等异步重写 code 的 DOM 会擦掉颜色层。重做严格投影，但自身写入不触发递归。
     this.colorObserver?.disconnect();
     this.clear();
+    this.owner.bindRenderedCode(this.containerEl, this.context);
     try { this.owner.renderReading(this.containerEl, this.context); }
     finally { this.colorObserver?.observe(this.containerEl, { childList: true, characterData: true, subtree: true }); }
     if (this.warningTimer) clearTimeout(this.warningTimer);

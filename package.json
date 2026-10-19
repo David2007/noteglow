@@ -8,7 +8,8 @@
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mjs",
     "install:local": "npm run build && node --experimental-strip-types scripts/install-local.mjs",
-    "migrate:colors": "node --experimental-strip-types scripts/migrate-note-colors.mjs"
+    "migrate:colors": "node --experimental-strip-types scripts/migrate-note-colors.mjs",
+    "test:coverage": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-test-coverage --test-coverage-include=src/**/*.ts --test tests/*.test.mjs"
   },
   "keywords": [
     "obsidian",

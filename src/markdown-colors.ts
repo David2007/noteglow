@@ -23,6 +23,39 @@ interface Model { ast: MdNode; leaves: Leaf[]; unknownHtml: Array<{ from: number
 const MAX_CHARS = 1_000_000;
 const MAX_RANGES = 10_000;
 
+/** Live Preview HTML widget 没有 postprocessor section 时，以 CM 提供的源锚点定位。 */
+export function mapRenderedCodeAtPosition(text: string, position: number, rendered: string, from: number, to: number): { from: number; to: number } {
+  if (!Number.isInteger(position) || position < 0 || position > text.length) throw new Error("代码源锚点无效。");
+  const ast = parseMarkdown(text);
+  const blocks = parseOwned(text, ast).owned.filter((item) => item.code && item.block);
+  const islands = blocks.filter((item) => item.from <= position && position <= item.to);
+  if (islands.length !== 1) throw new Error("代码源锚点不在唯一代码块内。");
+  // CM 对同一个 HTML widget 内的多个 DOM 子块可能返回相同边界。
+  // 即使代码文字相同，也不能用整块文字相等推断块身份；源 HTML token 必须只有一个自有 pre。
+  const tokens: Array<{ from: number; to: number }> = [];
+  walkMd(ast, (node) => {
+    if (node.type !== "html") return;
+    const bounds = node.position;
+    const start = bounds?.start.offset, end = bounds?.end.offset;
+    if (start !== undefined && end !== undefined && start <= islands[0].from && end >= islands[0].to) tokens.push({ from: start, to: end });
+  });
+  if (tokens.length !== 1 || blocks.filter((item) => item.from >= tokens[0].from && item.to <= tokens[0].to).length !== 1) throw new Error("同一 HTML 渲染区域包含多个代码块，无法确认选区来源。");
+  return mapRenderedCodeSelection(text, islands[0].from, islands[0].to, rendered, from, to);
+}
+
+/** 渲染选区仅在精确 section 内唯一的自有代码块上定位，绝不按首次文字匹配写回。 */
+export function mapRenderedCodeSelection(text: string, sectionFrom: number, sectionTo: number, rendered: string, from: number, to: number): { from: number; to: number } {
+  checkSelection(rendered, from, to);
+  if (!Number.isInteger(sectionFrom) || !Number.isInteger(sectionTo) || sectionFrom < 0 || sectionTo > text.length || sectionFrom >= sectionTo) throw new Error("代码来源范围无效。");
+  const islands = parseOwned(text, parseMarkdown(text)).owned.filter((item) => item.code && item.block && item.from >= sectionFrom && item.to <= sectionTo);
+  if (islands.length !== 1) throw new Error("代码来源不唯一，请重新选择代码块。");
+  const flat = flattenHtml(text, islands[0]);
+  if (flat.units.map((unit) => unit.value).join("") !== rendered) throw new Error("代码显示与来源不一致，请重新选择。");
+  const start = flat.units[from], end = flat.units[to - 1];
+  if (!start || !end || (from > 0 && flat.units[from - 1].from === start.from) || (to < flat.units.length && flat.units[to].to === end.to)) throw new Error("选区不能拆开实体或 emoji。");
+  return { from: start.from, to: end.to };
+}
+
 /** 只重建文本叶节点；容器、列表号、格式标记和链接目的地址继续使用原始源码。 */
 export function applyMarkdownColor(text: string, from: number, to: number, property?: ColorProperty, color?: string, legacyRanges: readonly ColorRange[] = []): PortableColorEdit {
   checkSelection(text, from, to);
@@ -203,7 +236,12 @@ function flattenHtml(text: string, item: Owned): FlatHtml {
       if (!location || !("startTag" in location) || !location.startTag || !location.endTag) throw new Error("插件 HTML 标签未闭合。");
       const current = color ? { ...inherited, ...parseStyles(node) } : inherited;
       boundaries.set(location.startTag.endOffset, units.length);
-      for (const child of node.childNodes) visit(child, current);
+      // pre 边界换行属于 HTML 排版，不属于代码正文；仅允许空白及唯一 code。
+      if (root && item.code && item.block) {
+        const code = node.childNodes.filter((child) => isElement(child) && child.tagName === "code");
+        if (code.length !== 1 || node.childNodes.some((child) => child !== code[0] && !(child.nodeName === "#text" && "value" in child && /^[\t\n\r\f ]*$/.test(child.value)))) throw new Error("插件代码容器结构不完整。");
+        visit(code[0], current);
+      } else for (const child of node.childNodes) visit(child, current);
       boundaries.set(location.endTag.startOffset, units.length);
     } else if ("childNodes" in node) for (const child of node.childNodes) visit(child, inherited);
     else throw new Error("插件颜色区域含无法确认的 HTML 内容。");
@@ -242,7 +280,7 @@ function buildModel(text: string, colors: readonly ColorRange[]): Model {
   for (const island of codeIslands) {
     const flat = flattenHtml(text, island);
     const code = island.block ? island.node.childNodes.find((node): node is HtmlElement => isElement(node) && node.tagName === "code") : island.node;
-    if (!code || (island.block && island.node.childNodes.some((node) => node !== code))) throw new Error("插件代码容器结构不完整。");
+    if (!code) throw new Error("插件代码容器结构不完整。");
     const lang = attr(code, "data-codex-lang") ?? attr(code, "class")?.replace(/^language-/, "");
     leaves.push({ from: island.from, to: island.to, value: flat.units.map((unit) => unit.value).join(""), units: flat.units, styles: flat.styles, code: true, block: island.block, owned: true, lang, boundaries: flat.boundaries });
   }

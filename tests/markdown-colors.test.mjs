@@ -270,3 +270,91 @@ test("returned selections support color, bold, italic and clear without reselect
   assert.equal(result.text, "***背景再加粗***");
   assert.equal(result.text.slice(result.from, result.to), "背景再加粗");
 });
+
+// 原生渲染选区必须先通过 section 和完整代码核验，再进行第二次颜色事务。
+test("rendered selection paints a second place without losing the first or code bytes", async () => {
+  const { mapRenderedCodeSelection } = await import("../src/markdown-colors.ts");
+  const original = 'update(a)\r\nupdatePtr(&a) // &amp; 😀\r\n';
+  let source = paint("```go\r\n" + original + "```\r\n", "update(a)").text;
+  const amp = original.indexOf("&a");
+  const mapped = mapRenderedCodeSelection(source, 0, source.length, original, amp, amp + 1);
+  assert.equal(source.slice(mapped.from, mapped.to), "&amp;");
+  source = applyMarkdownColor(source, mapped.from, mapped.to, "foreground", fg).text;
+  assert.equal(codeText(source), original);
+  assert.deepEqual(paintedText(source), [{ text: "update(a)", style: `background-color:${bg}` }, { text: "&", style: `color:${fg}` }]);
+  const emoji = original.indexOf("😀");
+  const emojiRange = mapRenderedCodeSelection(source, 0, source.length, original, emoji, emoji + 2);
+  const third = applyMarkdownColor(source, emojiRange.from, emojiRange.to, "background", bg).text;
+  assert.equal(codeText(third), original);
+  assert.ok(paintedText(third).some((part) => part.text === "😀"));
+  assert.throws(() => mapRenderedCodeSelection(source, 0, source.length, original, emoji + 1, emoji + 2), /emoji/);
+  assert.throws(() => mapRenderedCodeSelection(source, 0, source.length, original, emoji, emoji + 1), /emoji/);
+});
+
+test("identical rendered blocks use exact section bounds and reject ambiguity", async () => {
+  const { mapRenderedCodeSelection } = await import("../src/markdown-colors.ts");
+  const block = paint("```go\na & b\n```\n", "a").text;
+  const source = block + "\n" + block, start = block.length + 1;
+  const mapped = mapRenderedCodeSelection(source, start, source.length, "a & b\n", 2, 3);
+  assert.ok(mapped.from >= start);
+  const changed = applyMarkdownColor(source, mapped.from, mapped.to, "foreground", fg).text;
+  assert.equal(changed.slice(0, start), source.slice(0, start));
+  assert.equal(paintedText(changed).filter((part) => part.text === "&").length, 1);
+  assert.throws(() => mapRenderedCodeSelection(source, 0, source.length, "a & b\n", 2, 3), /不唯一/);
+  assert.throws(() => mapRenderedCodeSelection(source, 0, block.length, "changed\n", 0, 1), /不一致/);
+  for (const [from, to] of [[-1, 2], [0, source.length + 1], [0.5, 3], [2, 2]]) assert.throws(() => mapRenderedCodeSelection(source, from, to, "a & b\n", 0, 1), /范围/);
+  assert.throws(() => mapRenderedCodeSelection("text", 0, 4, "text", 0, 1), /不唯一/);
+});
+
+test("owned pre boundary whitespace is ignored while code newlines remain exact", async () => {
+  const { mapRenderedCodeSelection } = await import("../src/markdown-colors.ts");
+  const canonical = paint("```go\nfirst\n\nsecond\n```\n", "first").text;
+  const spaced = canonical.replace("><code", ">\n  <code").replace("</code></pre>", "</code>\n</pre>");
+  const rendered = "first\n\nsecond\n";
+  const selection = mapRenderedCodeSelection(spaced, 0, spaced.length, rendered, 7, 13);
+  const result = applyMarkdownColor(spaced, selection.from, selection.to, "foreground", fg);
+  assert.equal(codeText(result.text), rendered);
+  assert.ok(paintedText(result.text).some((part) => part.text === "second"));
+  for (const extra of ["not whitespace", "<code>other</code>", "<!-- comment -->", "<b>bad</b>"]) {
+    const invalid = canonical.replace("</code></pre>", `</code>${extra}</pre>`);
+    assert.throws(() => mapRenderedCodeSelection(invalid, 0, invalid.length, rendered, 0, 1), /结构/);
+  }
+  const unknown = canonical.replace("second", "<b>second</b>");
+  assert.throws(() => mapRenderedCodeSelection(unknown, 0, unknown.length, rendered, 0, 1), /未知/);
+});
+
+test("CM source anchor disambiguates duplicate HTML widgets and multiline wrappers", async () => {
+  const { mapRenderedCodeAtPosition } = await import("../src/markdown-colors.ts");
+  const block = paint("```go\na & b\n```\n", "a").text;
+  const source = block + "\n" + block, start = block.length + 1;
+  for (const anchor of [start, start + block.indexOf("<code"), source.indexOf("</pre>", start) + 6]) {
+    const selected = mapRenderedCodeAtPosition(source, anchor, "a & b\n", 2, 3);
+    assert.ok(selected.from >= start);
+    assert.equal(source.slice(selected.from, selected.to), "&amp;");
+  }
+  const multiline = block.replace("><code", ">\n  <code").replace("</code></pre>", "</code>\n</pre>");
+  const selected = mapRenderedCodeAtPosition(multiline, multiline.indexOf("</pre>"), "a & b\n", 2, 3);
+  assert.equal(multiline.slice(selected.from, selected.to), "&amp;");
+  for (const anchor of [-1, 0.5, source.length + 1]) assert.throws(() => mapRenderedCodeAtPosition(source, anchor, "a & b\n", 2, 3), /锚点无效/);
+  assert.throws(() => mapRenderedCodeAtPosition("plain text", 0, "plain text", 0, 1), /唯一代码块/);
+  assert.throws(() => mapRenderedCodeAtPosition(source, start, "stale", 0, 1), /不一致/);
+});
+
+test("CM widget boundary cannot identify the middle of identical blocks in one HTML token", async () => {
+  const { mapRenderedCodeAtPosition } = await import("../src/markdown-colors.ts");
+  const block = paint("```go\na & b\n```\n", "a").text.trimEnd();
+  const sharedWidget = [block, block, block].join("");
+  // 中间块的 DOM 可以得到整个 widget 的末端锚点；文本相等不足以确认是第三块。
+  assert.throws(() => mapRenderedCodeAtPosition(sharedWidget, sharedWidget.length, "a & b\n", 2, 3), /多个代码块/);
+  assert.throws(() => mapRenderedCodeAtPosition(sharedWidget, 0, "a & b\n", 2, 3), /多个代码块/);
+  // pre 是 raw HTML，关闭标签后的第一个换行结束 token；单、双换行都产生独立块。
+  for (const separator of ["\n", "\n\n"]) {
+    const separateWidgets = [block, block, block].join(separator);
+    const middle = block.length + separator.length;
+    const selection = mapRenderedCodeAtPosition(separateWidgets, middle, "a & b\n", 2, 3);
+    assert.ok(selection.from >= middle && selection.to < middle + block.length);
+    const result = applyMarkdownColor(separateWidgets, selection.from, selection.to, "foreground", fg);
+    assert.equal(result.text.slice(0, middle), separateWidgets.slice(0, middle));
+    assert.ok(result.text.endsWith(separator + block));
+  }
+});

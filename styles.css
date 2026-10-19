@@ -55,3 +55,16 @@
 .codex-notes-view .codex-notes-image-thumbnail { width: 46px; height: 36px; object-fit: contain; border-radius: 4px; }
 .codex-notes-image-label span { overflow: hidden; text-overflow: ellipsis; max-width: 140px; white-space: nowrap; }
 .codex-notes-image-preview img { display: block; max-width: 100%; max-height: 70vh; object-fit: contain; margin: 12px auto; }
+.codex-notes-code-toolbar {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: calc(100vw - 16px);
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
