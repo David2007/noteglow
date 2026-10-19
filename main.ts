@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { type ContextAttachment, validateAttachments } from "./src/context";
 import { readModels, type CodexModel } from "./src/models";
 import { registerNoteColors } from "./src/note-colors";
+import { registerNoteOutline } from "./src/note-outline";
 import { ImageStore } from "./src/image-store";
 import { validateImages, type ImageAttachment } from "./src/image-attachments";
 
@@ -80,6 +81,7 @@ export default class CodexWorkspacePlugin extends Plugin {
     this.addSettingTab(new CodexSettingTab(this.app, this));
     // 便携颜色按 Markdown 结构写入自有 HTML；旧旁路颜色由离线工具备份并迁移。
     await registerNoteColors(this);
+    registerNoteOutline(this);
   }
 
   onunload(): void {
