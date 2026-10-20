@@ -121,7 +121,7 @@ export function migrateMarkdownColors(text: string, ranges: readonly ColorRange[
 }
 
 /** 先在内存去掉自有颜色壳，格式标记写到壳外；只有最终文档交给一次编辑事务。 */
-export function formatMarkdownSelection(text: string, from: number, to: number, format: Format, legacyRanges: readonly ColorRange[] = [], native = false): PortableColorEdit {
+export function formatMarkdownSelection(text: string, from: number, to: number, format: Format, legacyRanges: readonly ColorRange[] = [], native = false, applyOnly = false): PortableColorEdit {
   checkSelection(text, from, to);
   const decoded = decodeOwnedColors(text);
   let start = decoded.map(from, 1), end = decoded.map(to, -1);
@@ -139,6 +139,7 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
     const coverage = coveredUnits(leaf, start, end)!;
     const value = leaf.value.slice(coverage.from, coverage.to);
     if (/[\r\n]/.test(value)) throw new Error("多行内容请使用代码块，未改动正文。");
+    if (applyOnly && leaf.code) return { text, from, to, ranges: [...legacyRanges] };
     if (leaf.code && (coverage.from !== 0 || coverage.to !== leaf.value.length)) throw new Error("取消代码格式时请选择完整的行内代码。");
     const sourceUnits = leaf.units.slice(coverage.from, coverage.to);
     let replacement: { text: string; pairs: Pair[] };
@@ -163,6 +164,15 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
     const pFrom = position(paragraph).from, pTo = position(paragraph).to;
     start = Math.max(start, pFrom); end = Math.min(end, pTo);
     const wanted = format === "bold" ? "strong" : "emphasis";
+    // 重复格式只补加，不把已有格式切掉；部分选中同一格式容器也保持原样。
+    if (applyOnly) {
+      let alreadyApplied = false;
+      walkMd(paragraph, (node) => {
+        const bounds = position(node);
+        if (node.type === wanted && bounds.from <= start && bounds.to >= end) alreadyApplied = true;
+      });
+      if (alreadyApplied) return { text, from, to, ranges: [...legacyRanges] };
+    }
     const wrapper = findExactFormat(paragraph, start, end, wanted);
     if (wrapper?.children?.length) {
       const bounds = position(wrapper);
@@ -725,4 +735,13 @@ export function nativeTextDocumentShape(text: string): string {
 export function projectNativeMarkdown(text: string, base = 0): { text: string; offsets: number[] } {
   const model = buildModel(text, []), units = model.leaves.filter((leaf) => !leaf.owned).flatMap((leaf) => leaf.units);
   return { text: units.map((unit) => unit.value).join(""), offsets: units.map((unit) => base + unit.from) };
+}
+
+/** 斜杠命令仅接管顶层普通文字行，代码、HTML、引用和 Obsidian 扩展保持字面内容。 */
+export function isPlainMarkdownLine(text: string, from: number, to: number): boolean {
+  const ast = parseMarkdown(text);
+  const paragraph = ast.children?.find((node) => node.type === "paragraph" && position(node).from <= from && position(node).to >= to);
+  if (!paragraph?.children?.some((node) => node.type === "text" && position(node).from <= from && position(node).to >= to)) return false;
+  const model = buildModel(text, []);
+  return ![...model.protected, ...model.unknownHtml].some((range) => from < range.to && to > range.from);
 }

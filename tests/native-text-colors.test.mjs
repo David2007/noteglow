@@ -352,3 +352,37 @@ test('cancelling outer italic preserves nested bold while partial selection neve
  assert.equal(projectNativeMarkdown(scanNativeText(partial.text)[0].source).text,'alpha');
  assert.deepEqual(nativeTextColorRanges(cancelled.text).map(range=>cancelled.text.slice(range.from,range.to)),['alpha']);
 });
+
+test('repeat format applies without toggling existing full or partial format and preserves colors',()=>{
+ for(const [format, source, selected] of [['bold','**alpha beta**','alpha'],['italic','*alpha beta*','alpha'],['code','`alpha beta`','alpha']]) {
+  const from=source.indexOf(selected);
+  assert.equal(formatNativeText(source,from,from+selected.length,format,true).text,source);
+  const fullFrom=source.indexOf('alpha beta');
+  assert.equal(formatNativeText(source,fullFrom,fullFrom+10,format,true).text,source);
+ }
+ for(const [format,expected] of [['bold','**alpha**'],['italic','*alpha*'],['code','`alpha`']]) {
+  const plain=paint('alpha beta','alpha').text;
+  const result=formatNativeText(plain,0,5,format,true);
+  assert.ok(result.text.startsWith(expected+' beta'));
+  assert.equal(scanNativeText(result.text)[0].status,'valid');
+  assert.equal(nativeTextColorRanges(result.text).map(range=>result.text.slice(range.from,range.to)).join(''),'alpha');
+  assert.equal(formatNativeText(result.text,result.from,result.to,format,true).text,result.text);
+ }
+ assert.throws(()=>formatNativeText('```\nalpha\n```',4,9,'bold',true));
+ assert.throws(()=>formatNativeText('`alpha`',1,6,'italic',true));
+ // 普通命令仍保留原来的切换语义。
+ assert.equal(formatNativeText('**alpha**',2,7,'bold').text,'alpha');
+});
+
+
+test('repeat bold on a mixed formatted and plain selection preserves visible text or rejects before editing',()=>{
+ const source='**Alpha** Beta';
+ let result;
+ try { result=formatNativeText(source,0,source.length,'bold',true); }
+ catch(error) {
+  assert.match(error.message,/格式操作将改变正文结构或代码文字|格式修改将改变段落结构/);
+  return;
+ }
+ assert.equal(projectNativeMarkdown(result.text).text,'Alpha Beta');
+ assert.equal(formatNativeText(result.text,result.from,result.to,'bold',true).text,result.text);
+});

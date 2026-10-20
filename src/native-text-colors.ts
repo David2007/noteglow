@@ -85,9 +85,9 @@ export function applyNativeTextColor(text: string, from: number, to: number, pro
   return { text: writeRanges(text, block, ranges), from, to };
 }
 /** 格式只在本块原生 Markdown 上执行；携带颜色通过解析器的精确位置映射，绝不重建 HTML。 */
-export function formatNativeText(text: string, from: number, to: number, format: "bold" | "italic" | "code"): PortableColorEdit {
+export function formatNativeText(text: string, from: number, to: number, format: "bold" | "italic" | "code", applyOnly = false): PortableColorEdit {
   const block = selectedBlock(text, from, to);
-  const result = formatMarkdownSelection(block.source, from - block.from, to - block.from, format, block.ranges, true);
+  const result = formatMarkdownSelection(block.source, from - block.from, to - block.from, format, block.ranges, true, applyOnly);
   const parsed = nativeTextBlocks(result.text);
   if (parsed.length !== 1 || !parsed[0].supported || parsed[0].kind !== block.kind || parsed[0].from !== 0 || parsed[0].to !== result.text.length) throw new Error("格式修改将改变段落结构，原文已保留。");
   const replacement = result.text + ((result.ranges?.length ?? 0) ? block.eol + block.eol + encodeNativeTextMetadata(result.text, result.ranges!) : "");

@@ -49,6 +49,8 @@ class NoteColorController {
   private readonly renderedCode = new WeakMap<HTMLElement, { path: string; text: string; from: number; to: number }>();
   private codeToolbar: HTMLElement | null = null;
   private colorPicker: { close(): void } | null = null;
+  // 只记录本次插件会话内已经保存并核验成功的 NoteGlow 操作，不猜测其他插件的格式。
+  private lastFormat: { property: ColorProperty; color: string } | { format: "bold" | "italic" | "code" } | null = null;
 
   constructor(private readonly plugin: Plugin) {
     this.filename = normalizePath(`${plugin.manifest.dir ?? `${plugin.app.vault.configDir}/plugins/${plugin.manifest.id}`}/note-colors.json`);
@@ -163,6 +165,18 @@ class NoteColorController {
         void owner.format(selection, format).catch((error: unknown) => new Notice(errorText(error), 8000));
       } });
     }
+    plugin.addCommand({
+      id: "repeat-last-format", name: "应用上次格式", hotkeys: [{ modifiers: ["Mod", "Shift"], key: "H" }],
+      editorCallback: (editor, info) => {
+        if (!owner.lastFormat) { new Notice("请先使用一次 NoteGlow 的字体色、背景色、加粗、斜体或行内代码。"); return; }
+        if (!(info instanceof MarkdownView)) { new Notice("请在笔记编辑视图中选择文字。"); return; }
+        const selection = owner.captureSelection(editor, info);
+        if (!selection) return;
+        const action = owner.lastFormat;
+        const applied = "property" in action ? owner.apply(selection, action.property, action.color) : owner.format(selection, action.format, true);
+        void applied.catch((error: unknown) => new Notice(errorText(error), 8000));
+      }
+    });
     plugin.registerEvent(plugin.app.vault.on("modify", (file) => {
       if (!(file instanceof TFile) || !this.data.notes[file.path] || this.disposed) return;
       void this.readExternal(file).then(() => {
@@ -317,6 +331,7 @@ class NoteColorController {
 
   async apply(selection: ColorSelection, property?: ColorProperty, color?: string): Promise<void> {
     await this.writeMarkdown(selection, () => applyNativeCodeColor(selection.text, selection.from, selection.to, property, color) ?? applyNativeTextColor(selection.text, selection.from, selection.to, property, color), property, color);
+    if (property && color) this.lastFormat = { property, color: normalizeColor(color)! };
   }
 
   private async restoreNativeCode(view: MarkdownView): Promise<void> {
@@ -344,8 +359,9 @@ class NoteColorController {
     new Notice(reset ? `正文颜色记录已重置，正文保留；备份：${backup}` : `已恢复 ${migrated.count} 处正文/行内代码与 ${decodeOwnedCodeBlocks(text).length} 个代码块，跳过 0 处；备份：${backup}`, 10000);
   }
 
-  private async format(selection: ColorSelection, format: "bold" | "italic" | "code"): Promise<void> {
-    await this.writeMarkdown(selection, () => formatNativeText(selection.text, selection.from, selection.to, format));
+  private async format(selection: ColorSelection, format: "bold" | "italic" | "code", applyOnly = false): Promise<void> {
+    await this.writeMarkdown(selection, () => formatNativeText(selection.text, selection.from, selection.to, format, applyOnly));
+    this.lastFormat = { format };
   }
 
   /** 颜色的事实来源是最终 Markdown。纯函数先完成所有核验，再进行一次可撤销编辑。 */
