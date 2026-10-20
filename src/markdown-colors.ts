@@ -739,6 +739,10 @@ export function projectNativeMarkdown(text: string, base = 0): { text: string; o
 
 /** 斜杠命令仅接管顶层普通文字行，代码、HTML、引用和 Obsidian 扩展保持字面内容。 */
 export function isPlainMarkdownLine(text: string, from: number, to: number): boolean {
+  // 此处只判断语法上下文。统一换行避开旧颜色投影的 CRLF 限制；实际编辑仍使用原始位置和换行。
+  if (text.includes("\r\n")) {
+    return isPlainMarkdownLine(text.replace(/\r\n/g, "\n"), text.slice(0, from).replace(/\r\n/g, "\n").length, text.slice(0, to).replace(/\r\n/g, "\n").length);
+  }
   const ast = parseMarkdown(text);
   const paragraph = ast.children?.find((node) => node.type === "paragraph" && position(node).from <= from && position(node).to >= to);
   if (!paragraph?.children?.some((node) => node.type === "text" && position(node).from <= from && position(node).to >= to)) return false;
