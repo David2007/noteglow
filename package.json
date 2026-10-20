@@ -1,6 +1,6 @@
 {
   "name": "codex-notes",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Colorful Markdown notes with a native Codex chat panel, multiple selections, and model choice.",
   "main": "main.js",
   "scripts": {

@@ -20,6 +20,10 @@
 .codex-notes-empty p { max-width: 280px; margin: 0; line-height: 1.6; }
 .codex-notes-message { margin-bottom: 14px; }
 .codex-notes-message-role { margin-bottom: 5px; color: var(--text-muted); font-size: var(--font-ui-smaller); font-weight: var(--font-semibold); }
+.codex-notes-message-role { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.codex-notes-code-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+.codex-notes-reply-action { padding: 2px 8px; min-height: 26px; font-size: var(--font-ui-smaller); cursor: pointer; }
+.codex-notes-reply-action:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
 .codex-notes-message-body { padding: 9px 11px; border-radius: var(--radius-m); line-height: 1.55; overflow-wrap: anywhere; }
 .codex-notes-message.is-user .codex-notes-message-body { background: var(--interactive-accent); color: var(--text-on-accent); white-space: pre-wrap; }
 .codex-notes-message.is-assistant .codex-notes-message-body { background: var(--background-secondary); }

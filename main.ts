@@ -14,12 +14,14 @@ import { slashCommandExtension } from "./src/editor-shortcuts";
 import { registerNoteOutline } from "./src/note-outline";
 import { ImageStore } from "./src/image-store";
 import { validateImages, type ImageAttachment } from "./src/image-attachments";
+import { replyTargetAvailable } from "./src/reply-actions";
 
 export default class CodexWorkspacePlugin extends Plugin {
   declare settings: PluginSettings;
   readonly codex = new CodexClient();
   private conversations!: ConversationRepository;
   private lastMarkdownView: MarkdownView | null = null;
+  private lastReplyMarkdownView: MarkdownView | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
   private openingSelection = false;
   private unloaded = false;
@@ -37,6 +39,7 @@ export default class CodexWorkspacePlugin extends Plugin {
     const activeMarkdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (activeMarkdownView?.file) {
       this.lastMarkdownView = activeMarkdownView;
+      this.lastReplyMarkdownView = activeMarkdownView;
     }
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => this.rememberMarkdownView(leaf))
@@ -107,6 +110,12 @@ export default class CodexWorkspacePlugin extends Plugin {
       .find((view): view is MarkdownView => view instanceof MarkdownView && view.file !== null);
     this.lastMarkdownView = fallback ?? null;
     return this.lastMarkdownView;
+  }
+
+  getReplyMarkdownView(): MarkdownView | null {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView) ?? this.lastReplyMarkdownView;
+    // 插入是写操作，不沿用引用功能的“任取一篇打开笔记”兜底；已关闭或阅读模式拒绝写入。
+    return replyTargetAvailable(view, this.app.workspace.getLeavesOfType("markdown").some((leaf) => leaf.view === view), this.unloaded) ? view : null;
   }
 
   get activeConversation(): Conversation {
@@ -330,6 +339,7 @@ export default class CodexWorkspacePlugin extends Plugin {
   private rememberMarkdownView(leaf: WorkspaceLeaf | null): void {
     if (leaf?.view instanceof MarkdownView && leaf.view.file) {
       this.lastMarkdownView = leaf.view;
+      this.lastReplyMarkdownView = leaf.view;
     }
   }
 }

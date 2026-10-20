@@ -1,7 +1,7 @@
 {
   "id": "codex-notes",
   "name": "NoteGlow",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "minAppVersion": "1.14.4",
   "description": "Chat with your notes through Codex CLI, attach multiple selections, choose models, and save portable Markdown colors.",
   "author": "david yang",

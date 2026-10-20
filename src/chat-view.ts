@@ -6,6 +6,7 @@ import { buildPromptWithContext, type ContextAttachment, validateAttachments } f
 import type { ChatMessage } from "./types";
 import { MAX_IMAGES, MAX_IMAGE_BYTES, MAX_IMAGE_TOTAL_BYTES, inspectImage, validateImages, type ImageAttachment } from "./image-attachments";
 import type { PreparedImages } from "./image-store";
+import { addReplyActions, insertReplyCode } from "./reply-actions";
 
 export const CODEX_VIEW_TYPE = "codex-notes-chat";
 // CLI 退出到消息落盘完成之间仍属于同一次发送，重开侧栏不能提前编辑或发送。
@@ -281,13 +282,26 @@ export class CodexChatView extends ItemView {
     if (this.closed) return;
     this.messagesEl.querySelector(".codex-notes-empty")?.remove();
     const wrapper = this.messagesEl.createDiv({ cls: `codex-notes-message is-${message.role}` });
-    wrapper.createDiv({ cls: "codex-notes-message-role", text: message.role === "user" ? "你" : message.role === "assistant" ? "Codex" : "系统" });
+    const header = wrapper.createDiv({ cls: "codex-notes-message-role", text: message.role === "user" ? "你" : message.role === "assistant" ? "Codex" : "系统" });
     if (message.attachments?.length || message.images?.length) {
       const cards = wrapper.createDiv({ cls: "codex-notes-attachments codex-notes-history-attachments" });
       this.renderAttachments(cards, message.attachments ?? [], false, message.images ?? []);
     }
     const body = wrapper.createDiv({ cls: "codex-notes-message-body" });
-    if (message.role === "assistant") { await MarkdownRenderer.render(this.app, message.text, body, "", this.messageRenderer ?? this); }
+    if (message.role === "assistant") {
+      await MarkdownRenderer.render(this.app, message.text, body, "", this.messageRenderer ?? this);
+      if (this.closed || !wrapper.isConnected) return;
+      addReplyActions({
+        body, header, markdown: message.text, active: () => !this.closed && this.messagesEl.contains(wrapper),
+        copy: (text) => navigator.clipboard.writeText(text),
+        apply: (code) => {
+          const target = this.plugin.getReplyMarkdownView();
+          if (!target) throw new Error("请先在打开的 Markdown 笔记中进入编辑模式并放置光标。");
+          insertReplyCode(target.editor, code);
+        },
+        notice: (text) => { new Notice(text); }
+      });
+    }
     else { body.setText(message.text); }
   }
 
