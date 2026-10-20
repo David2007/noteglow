@@ -1,5 +1,8 @@
 import { fromMarkdown } from "mdast-util-from-markdown";
 import type { Editor } from "obsidian";
+import { Transaction } from "@codemirror/state";
+import { isolateHistory } from "@codemirror/commands";
+import type { EditorView } from "@codemirror/view";
 
 export function replyTargetAvailable(view: { file: unknown; getMode(): string; editor: Editor } | null, open: boolean, unloaded: boolean): boolean {
   if (unloaded || !view?.file || !open || view.getMode() !== "source") return false;
@@ -18,13 +21,21 @@ export function replyCodeBlocks(markdown: string): string[] {
   return blocks;
 }
 
-/** 在选区活动端插入，绝不替换选中文字；一次 transaction 对应一次撤销。 */
+/** 在选区活动端插入，并显式隔离前后输入；单个 transaction 本身不能保证独立撤销。 */
 export function insertReplyCode(editor: Editor, code: string): void {
   if (!code) throw new Error("代码块为空，未插入。");
-  const cursor = editor.getCursor("head");
-  const lines = code.split("\n");
-  const end = { line: cursor.line + lines.length - 1, ch: lines.length === 1 ? cursor.ch + code.length : lines[lines.length - 1].length };
-  editor.transaction({ changes: [{ from: cursor, to: cursor, text: code }], selection: { from: end, to: end } });
+  const cm = (editor as unknown as { cm?: EditorView }).cm;
+  // Obsidian 桌面编辑器使用 CM6。旧宿主无法提供历史隔离时拒绝写入，
+  // 避免降级 transaction 将用户刚输入的文字和 Apply 合并撤销。
+  if (!cm?.state || typeof cm.dispatch !== "function") throw new Error("当前编辑器不支持独立撤销，请更新 Obsidian 后重试。");
+  if (cm.state.readOnly) throw new Error("当前笔记为只读，未插入。");
+  const cursor = cm.state.selection.main.head;
+  cm.dispatch({
+    changes: { from: cursor, to: cursor, insert: code },
+    selection: { anchor: cursor + cm.state.toText(code).length },
+    annotations: [Transaction.userEvent.of("input.noteglow-apply"), isolateHistory.of("full")],
+    scrollIntoView: true
+  });
   editor.focus();
 }
 

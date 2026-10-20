@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Window } from 'happy-dom';
+import { EditorState, Transaction } from '@codemirror/state';
+import { history, undo, redo } from '@codemirror/commands';
 import { replyCodeBlocks, insertReplyCode, replyTargetAvailable, addReplyActions } from '../src/reply-actions.ts';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -11,14 +13,48 @@ test('Markdown code extraction preserves spaces and handles nested, tilde, inden
   assert.deepEqual(replyCodeBlocks('````md\n```\n````'), ['```']);
 });
 
+function editorWithHistory(config = {}) {
+  let state = EditorState.create({ doc: 'AB', selection: { anchor: 0, head: 1 }, extensions: [history()], ...config });
+  let focused = 0, transactions = 0;
+  const cm = { get state() { return state; }, dispatch(spec) { transactions++; state = spec instanceof Transaction ? spec.state : state.update(spec).state; } };
+  return { cm, editor: { cm, focus() { focused++; } }, get focused() { return focused; }, get transactions() { return transactions; } };
+}
+
 test('Apply inserts at active selection head in one transaction without deleting selection', () => {
-  for (const [code, expected] of [['one', { line: 3, ch: 5 }], ['a\n  b', { line: 4, ch: 3 }]]) {
-    const calls = []; let focused = 0;
-    insertReplyCode({ getCursor: which => { assert.equal(which, 'head'); return { line: 3, ch: 2 }; }, transaction: tx => calls.push(tx), focus: () => focused++ }, code);
-    assert.deepEqual(calls, [{ changes: [{ from: { line: 3, ch: 2 }, to: { line: 3, ch: 2 }, text: code }], selection: { from: expected, to: expected } }]);
-    assert.equal(focused, 1);
+  for (const code of ['one', 'a\n  b', 'a\r\nb']) {
+    const env = editorWithHistory();
+    insertReplyCode(env.editor, code);
+    const normalized = code.replace(/\r\n/g, '\n');
+    assert.equal(env.cm.state.doc.toString(), `A${normalized}B`);
+    assert.equal(env.cm.state.selection.main.head, normalized.length + 1);
+    assert.equal(env.cm.state.selection.main.empty, true);
+    assert.equal(env.focused, 1); assert.equal(env.transactions, 1);
   }
   assert.throws(() => insertReplyCode({}, ''), /代码块为空/);
+  assert.throws(() => insertReplyCode({}, 'x'), /不支持独立撤销/);
+  assert.throws(() => insertReplyCode({ cm: { state: {} } }, 'x'), /不支持独立撤销/);
+  const readOnly = editorWithHistory({ extensions: [EditorState.readOnly.of(true)] });
+  assert.throws(() => insertReplyCode(readOnly.editor, 'x'), /只读/);
+  assert.equal(readOnly.transactions, 0);
+});
+
+test('real CM6 history keeps preceding typing, Apply and following typing in separate undo groups', () => {
+  const env = editorWithHistory({ doc: '', selection: { anchor: 0 } });
+  function type(value) {
+    env.cm.dispatch({ ...env.cm.state.replaceSelection(value), annotations: Transaction.userEvent.of('input.type') });
+  }
+  type('X');
+  insertReplyCode(env.editor, 'code');
+  type('Y');
+  assert.equal(env.cm.state.doc.toString(), 'XcodeY');
+  for (const expected of ['Xcode', 'X', '']) {
+    assert.equal(undo(env.cm), true);
+    assert.equal(env.cm.state.doc.toString(), expected);
+  }
+  for (const expected of ['X', 'Xcode', 'XcodeY']) {
+    assert.equal(redo(env.cm), true);
+    assert.equal(env.cm.state.doc.toString(), expected);
+  }
 });
 
 test('target gate rejects missing, closed, reading, unloaded and read-only editors', () => {
