@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EditorState, EditorSelection, Transaction } from '@codemirror/state';
 import { history, undo, redo } from '@codemirror/commands';
+import { applyNativeTextColor, nativeTextColorTransactions, createNativeTextMetadataField } from '../src/native-text-colors.ts';
+import { applyNativeCodeColor, nativeCodeColorTransactions, createNativeMetadataField } from '../src/native-code-colors.ts';
 import { slashCommandEdit, expandSlashCommand } from '../src/editor-shortcuts.ts';
 
 function expand(source, command) {
@@ -62,4 +64,24 @@ test('composition, read-only, selections, multiple cursors and ordinary Enter ar
   const state = EditorState.create(config);
   assert.equal(expandSlashCommand({ state, composing, dispatch() { assert.fail('must not dispatch'); } }), false);
  }
+});
+
+
+test('code redo retains body cursor with native text/code metadata transaction filters', () => {
+ const coloredText = applyNativeTextColor('Alpha', 0, 5, 'background', '#fff88f').text;
+ const codeSource = '```js\nconst a = 1;\n```';
+ const coloredCode = applyNativeCodeColor(codeSource, 6, 11, 'foreground', '#c0392b').text;
+ const doc = coloredText + '\n\n' + coloredCode + '\n\n/code';
+ let state = EditorState.create({ doc, selection: { anchor: doc.length }, extensions: [history(), nativeTextColorTransactions, nativeCodeColorTransactions, createNativeTextMetadataField(() => true), createNativeMetadataField(() => true)] });
+ const view = { composing: false, get state() { return state; }, dispatch(spec) { state = spec instanceof Transaction ? spec.state : state.update(spec).state; } };
+ assert.equal(expandSlashCommand(view), true);
+ const converted = state.doc.toString(), bodyCursor = state.selection.main.head;
+ assert.equal(converted.slice(bodyCursor - 4), '```\n\n```');
+ assert.equal(undo(view), true);
+ assert.equal(state.doc.toString(), doc);
+ assert.equal(redo(view), true);
+ assert.equal(state.doc.toString(), converted);
+ assert.equal(state.selection.main.head, bodyCursor);
+ view.dispatch(state.replaceSelection('RedoBody'));
+ assert.equal(state.doc.toString(), converted.slice(0, bodyCursor) + 'RedoBody' + converted.slice(bodyCursor));
 });
