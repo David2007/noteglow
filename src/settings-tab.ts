@@ -50,6 +50,21 @@ export class CodexSettingTab extends PluginSettingTab {
         })
       );
 
+    new Setting(containerEl).setName("粘贴代码时自动格式化")
+      .setDesc("普通代码块和 /code 内粘贴时识别 Go、Python、Java；已有颜色记录的块保留原文。")
+      .addToggle((toggle) => toggle.setValue(this.plugin.settings.autoFormatCode).onChange(async (value) => {
+        this.plugin.settings.autoFormatCode = value;
+        await this.plugin.persistSettings();
+      }));
+    for (const [key, label, example] of [["gofmtPath", "gofmt 路径", "/usr/local/go/bin/gofmt"], ["blackPath", "Black 路径", "/opt/homebrew/bin/black"]] as const) {
+      new Setting(containerEl).setName(label)
+        .setDesc(`可选单个可执行文件路径，留空自动寻找。不支持命令参数；例如 ${example}。更改后下次粘贴生效，找不到工具保留原文。`)
+        .addText((text) => text.setValue(this.plugin.settings[key]).setPlaceholder(example).onChange(async (value) => {
+          this.plugin.settings[key] = value.trim();
+          await this.plugin.persistSettings();
+        }));
+    }
+
     const security = containerEl.createDiv({ cls: "codex-notes-settings-note" });
     security.createEl("strong", { text: "安全边界" });
     security.createEl("p", {

@@ -24,6 +24,9 @@ export interface Conversation {
 }
 
 export interface PluginSettings {
+  autoFormatCode: boolean;
+  gofmtPath: string;
+  blackPath: string;
   codexPath: string;
   sandboxMode: SandboxMode;
   approveForMe: boolean;

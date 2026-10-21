@@ -24,6 +24,9 @@ export function loadPluginSettings(raw: unknown, options: LoadOptions = {}): Loa
   const makeId = options.makeId ?? createId;
   const source = isRecord(raw) ? raw : {};
   const base = {
+    autoFormatCode: typeof source.autoFormatCode === "boolean" ? source.autoFormatCode : true,
+    gofmtPath: asString(source.gofmtPath) ?? "",
+    blackPath: asString(source.blackPath) ?? "",
     codexPath: asString(source.codexPath) ?? "codex",
     sandboxMode: asSandboxMode(source.sandboxMode) ?? "workspace-write",
     approveForMe: typeof source.approveForMe === "boolean" ? source.approveForMe : true
