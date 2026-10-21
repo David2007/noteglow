@@ -1,3 +1,4 @@
+import { createChatSidebar } from "./src/chat-sidebar";
 import { FileSystemAdapter, MarkdownView, normalizePath, Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { CodexChatView, CODEX_VIEW_TYPE } from "./src/chat-view";
 import { CodexClient } from "./src/codex-client";
@@ -30,6 +31,7 @@ export default class CodexWorkspacePlugin extends Plugin {
   private openingSelection = false;
   private unloaded = false;
   private imageStorage: ImageStore | undefined;
+  private chatSidebar: ReturnType<typeof createChatSidebar> | undefined;
 
   get images(): ImageStore {
     const adapter = this.app.vault.adapter;
@@ -93,6 +95,13 @@ export default class CodexWorkspacePlugin extends Plugin {
     this.registerEditorExtension(slashCommandExtension);
     this.registerEditorExtension(cleanEditorExtension((state) => this.settings.cleanLivePreview && state.field(editorLivePreviewField, false) === true));
     registerLinkEditor(this);
+    this.chatSidebar ??= createChatSidebar(this.app.workspace, CODEX_VIEW_TYPE, () => this.unloaded);
+    // 每次启用只执行一次；用户关闭后不监听布局变化自动重开。
+    this.app.workspace.onLayoutReady(() => {
+      if (!this.unloaded) void this.chatSidebar?.open(true).catch(() => {
+        if (!this.unloaded) new Notice("NoteGlow 自动打开失败，可点击机器人图标重试。");
+      });
+    });
     this.registerEditorExtension(codeFormatExtension({
       settings: () => this.settings,
       path: (view) => this.unloaded ? null : view.state.field(editorInfoField, false)?.file?.path ?? null
@@ -244,13 +253,8 @@ export default class CodexWorkspacePlugin extends Plugin {
   }
 
   async activateView(): Promise<void> {
-    const workspace = this.app.workspace;
-    let leaf = workspace.getLeavesOfType(CODEX_VIEW_TYPE)[0];
-    if (!leaf) {
-      leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf("split", "vertical");
-      await leaf.setViewState({ type: CODEX_VIEW_TYPE, active: true });
-    }
-    await workspace.revealLeaf(leaf);
+    this.chatSidebar ??= createChatSidebar(this.app.workspace, CODEX_VIEW_TYPE, () => this.unloaded);
+    await this.chatSidebar.open();
   }
 
   async sendToCodex(
