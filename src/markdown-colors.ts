@@ -853,8 +853,7 @@ function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRan
         }
         if (end >= start && end <= to - 1) {
           add(from, innerFrom); add(innerTo, to);
-          // 空 destination 后的引号是 title，不把 title 的第一词误当地址；视觉仍隐藏语法。
-          if (node.url !== "" || start === to - 1 || text.slice(start, end) === "<>") links.push({ from, to, addressFrom: start, addressTo: end, url: String(node.url ?? "") });
+          links.push({ from, to, addressFrom: start, addressTo: end, url: String(node.url ?? "") });
         }
       }
     }

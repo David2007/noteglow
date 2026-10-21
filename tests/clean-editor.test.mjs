@@ -69,10 +69,17 @@ test('link address encoding preserves entity-looking URL query text on parse rou
 });
 
 
-test('empty destination with title stays visually clean but is not exposed to unsafe address editing',()=>{
- for(const source of ['[label]( "my title")','[label]( "title")',"[label]( 'title')"]) {
-  assert.equal(visible(source),'label');assert.equal(cleanMarkdownSyntax(source).links.length,0);
+test('only parser-confirmed links hide; explicit empty angle destination preserves its real title',()=>{
+ const literal='[label]( "my title")';
+ assert.equal(visible(literal),literal);assert.equal(cleanMarkdownSyntax(literal).links.length,0);
+ for(const source of ['[label]( "title")',"[label]( 'title')"]) {
+  // 当前 CommonMark 解析器把引号视为 URL 字符，不是 title。
+  assert.equal(visible(source),'label');assert.equal(cleanMarkdownSyntax(source).links[0].url,source.slice(9,-1));
  }
+ const source='[label](<> "my title")',link=cleanMarkdownSyntax(source).links[0];
+ assert.equal(visible(source),'label');assert.equal(link.url,'');
+ assert.equal(source.slice(link.addressFrom,link.addressTo),'<>');
+ assert.equal(source.slice(0,link.addressFrom)+markdownLinkAddress('https://new.test')+source.slice(link.addressTo),'[label](<https://new.test> "my title")');
  assert.equal(cleanMarkdownSyntax('[label]()').links.length,1);
 });
 
