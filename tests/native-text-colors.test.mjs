@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {EditorState,EditorSelection,Transaction,StateField,StateEffect} from '@codemirror/state';
+import {EditorState,EditorSelection,Transaction,StateField,StateEffect,ChangeSet} from '@codemirror/state';
 import {history,undo,redo,isolateHistory,deleteCharBackward,deleteCharForward} from '@codemirror/commands';
 import {EditorView} from '@codemirror/view';
 import {Window} from 'happy-dom';
-import {applyNativeTextColor,formatNativeText,scanNativeText,nativeTextColorRanges,nativeTextColorTransactions,migrateOwnedTextToNative,resetNativeTextMetadata,encodeNativeTextMetadata,createNativeTextMetadataField} from '../src/native-text-colors.ts';
+import {applyNativeTextColor,formatNativeText,scanNativeText,nativeTextColorRanges,nativeTextColorTransactions,migrateOwnedTextToNative,resetNativeTextMetadata,encodeNativeTextMetadata,createNativeTextMetadataField,nativeTextMetadataChanges,nativeTextOwnedRecords,repairNativeTextMetadata} from '../src/native-text-colors.ts';
 import {applyNativeCodeColor,nativeCodeColorTransactions,scanNativeCode,minimalTextChange} from '../src/native-code-colors.ts';
 import {applyMarkdownColor,nativeTextDocumentShape,restoreOwnedInline,projectNativeMarkdown} from '../src/markdown-colors.ts';
 import {alignRenderedText} from '../src/color-ranges.ts';
@@ -385,4 +385,103 @@ test('repeat bold on a mixed formatted and plain selection preserves visible tex
  }
  assert.equal(projectNativeMarkdown(result.text).text,'Alpha Beta');
  assert.equal(formatNativeText(result.text,result.from,result.to,'bold',true).text,result.text);
+});
+
+
+test('inserting a quote before hidden text metadata keeps the original color, user text and one Undo',()=>{
+ const source=paint('alpha\n\nafter','alpha').text;
+ const h=harness(source),at=source.indexOf('alpha')+5;
+ h.edit({from:at,insert:'\n\n> user quote'});
+ const changed=h.text,block=scanNativeText(changed)[0];
+ assert.equal(block.status,'valid');assert.equal(block.source,'alpha');
+ assert.deepEqual(block.ranges,[{from:0,to:5,property:'background',color:bg}]);
+ assert.ok(changed.indexOf('noteglow-text-colors')<changed.indexOf('> user quote'));
+ assert.equal(resetNativeTextMetadata(changed),'alpha\n\n> user quote\n\nafter');
+ assert.equal(undo(h.target),true);assert.equal(h.text,source);
+ assert.equal(redo(h.target),true);assert.equal(h.text,changed);
+});
+
+test('pure metadata relocation preserves CRLF offsets and every original visible byte',()=>{
+ const source=paint('alpha\r\n\r\nafter','alpha').text;
+ const insert='\r\n\r\n> user quote';
+ // ChangeSet 使用原始字符串偏移；不通过默认会规范换行的 EditorState 构造文档。
+ const changes=ChangeSet.of({from:5,insert},source.length,"\n");
+ const after=source.slice(0,5)+insert+source.slice(5);
+ const edits=nativeTextMetadataChanges(source,after,changes);
+ assert.equal(edits.length,2);
+ let result=after;
+ for(const edit of [...edits].reverse()) result=result.slice(0,edit.from)+edit.insert+result.slice(edit.to);
+ assert.equal(scanNativeText(result)[0].status,'valid');
+ assert.equal(resetNativeTextMetadata(result),'alpha\r\n\r\n> user quote\r\n\r\nafter');
+ assert.equal(result.replace(/\r\n/g,'' ).includes('\n'),false);
+});
+
+test('Enter first relocates the hidden record and maps the caret to the next visible line before quote typing',()=>{
+ const source=paint('alpha','alpha').text;
+ for(const enters of [1,2]) {
+  let state=EditorState.create({doc:source,selection:{anchor:5},extensions:[history(),nativeTextColorTransactions,createNativeTextMetadataField(()=>true)]});
+  // 每次 Enter 都是独立原生输入，不能用一次整块粘贴代替光标映射验收。
+  for(let i=0;i<enters;i++) {
+   state=state.update({...state.replaceSelection('\n'),annotations:Transaction.userEvent.of('input.type')}).state;
+   assert.equal(scanNativeText(state.doc.toString())[0].status,'valid');
+   assert.equal(state.selection.main.head,state.doc.length);
+  }
+  for(const character of '> user quote') state=state.update({...state.replaceSelection(character),annotations:Transaction.userEvent.of('input.type')}).state;
+  assert.ok(state.doc.toString().endsWith('\n'.repeat(enters)+'> user quote'));
+  assert.equal(scanNativeText(state.doc.toString())[0].status,'valid');
+  assert.equal(nativeTextOwnedRecords(state.doc.toString()).length,1);
+ }
+});
+
+test('explicit orphan repair crosses only local quotes, preserves original content and is idempotent',()=>{
+ const colored=paint('alpha\n\nafter','alpha').text;
+ const orphan=colored.replace('alpha\n\n<!--','alpha\n\n> user quote\n\n<!--');
+ assert.equal(scanNativeText(orphan)[0].status,'none');
+ const repaired=repairNativeTextMetadata(orphan);
+ assert.equal(scanNativeText(repaired)[0].status,'valid');
+ assert.equal(resetNativeTextMetadata(repaired),resetNativeTextMetadata(orphan));
+ assert.equal(nativeTextDocumentShape(repaired),nativeTextDocumentShape(orphan));
+ assert.equal(repairNativeTextMetadata(repaired),repaired);
+ assert.ok(repaired.indexOf('noteglow-text-colors')<repaired.indexOf('> user quote'));
+ const cleared=applyNativeTextColor(repaired,0,5).text;
+ assert.equal(cleared,'alpha\n\n> user quote\n\nafter');
+ const formatted=formatNativeText(repaired,0,5,'bold').text;
+ assert.ok(formatted.startsWith('**alpha**'));assert.ok(formatted.includes('> user quote'));
+});
+
+test('orphan recovery refuses repeated snapshots, nonquote gaps, changed text and noncanonical records',()=>{
+ const record=encodeNativeTextMetadata('alpha',[{from:0,to:5,property:'background',color:bg}]);
+ for(const source of [
+  'alpha\n\nalpha\n\n> quote\n\n'+record,
+  'alpha\n\n> quote\n\n'+record+'\n\n'+record,
+  'alpha\n\nbeta\n\n'+record,
+  'alpha\n\n```\ncode\n```\n\n'+record,
+  'alpha\n\n<div>html</div>\n\n'+record,
+  'changed\n\n> quote\n\n'+record,
+  'alpha\n\n> quote\n\n'+record.replace('"version":1','"version":2')
+ ]) assert.equal(repairNativeTextMetadata(source),source);
+});
+
+test('Live Preview hides canonical orphan records without hiding code, YAML, quote or invalid text',()=>{
+ const record=encodeNativeTextMetadata('alpha',[{from:0,to:5,property:'background',color:bg}]);
+ const field=createNativeTextMetadataField(()=>true);
+ const orphan='alpha\n\n> quote\n\n'+record;
+ const state=EditorState.create({doc:orphan,extensions:[field]});
+ assert.equal(state.field(field).size,1);assert.equal(state.doc.toString(),orphan);
+ for(const source of ['```\n'+record+'\n```','---\nvalue: |\n  '+record+'\n---','> '+record,record.replace('"version":1','"version":2'),record+' user text']) {
+  assert.equal(EditorState.create({doc:source,extensions:[field]}).field(field).size,0,source);
+ }
+});
+
+test('quote insertion preserves independent native code metadata with either transaction filter order',()=>{
+ let source=paint('alpha\n\n```go\nvalue\n```','alpha').text;
+ const at=source.indexOf('value');source=applyNativeCodeColor(source,at,at+5,'foreground',fg).text;
+ const expectedCode=scanNativeCode(source)[0];
+ for(const reverse of [false,true]) {
+  const h=harness(source,reverse);h.edit({from:5,insert:'\n\n> quote'});
+  const code=scanNativeCode(h.text)[0];
+  assert.equal(code.status,'valid');assert.equal(code.code,expectedCode.code);assert.deepEqual(code.ranges,expectedCode.ranges);
+  assert.equal(scanNativeText(h.text)[0].status,'valid');
+  assert.equal(undo(h.target),true);assert.equal(h.text,source);
+ }
 });

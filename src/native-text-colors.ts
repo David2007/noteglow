@@ -1,7 +1,7 @@
 import { EditorState, StateField, ChangeSet } from "@codemirror/state";
 import { Decoration, EditorView, type DecorationSet } from "@codemirror/view";
 import { mapColorRanges, normalizeColor, replaceColor, mergeRanges, type ColorRange, type ColorProperty } from "./color-ranges.ts";
-import { nativeTextBlocks, nativeTextDocumentShape, nativeTextMetadataRecords, restoreOwnedInline, formatMarkdownSelection, type PortableColorEdit } from "./markdown-colors.ts";
+import { nativeTextBlocks, nativeTextDocumentShape, nativeTextMetadataRecords, nativeTextQuoteGap, restoreOwnedInline, formatMarkdownSelection, type PortableColorEdit } from "./markdown-colors.ts";
 
 const MARKER = "<!-- noteglow-text-colors:", PREFIX = MARKER + "1 ";
 const MAX_TEXT = 1_000_000, MAX_BLOCK = 200_000;
@@ -28,6 +28,48 @@ export function encodeNativeTextMetadata(source: string, ranges: readonly ColorR
   if (source.length > MAX_BLOCK || !validRanges(ranges, source)) throw new Error("正文颜色记录超限或范围无效。");
   return PREFIX + JSON.stringify({ version: 1, source, ranges }).replace(/[<>&-]/g, (value) => `\\u${value.charCodeAt(0).toString(16).padStart(4, "0")}`) + " -->";
 }
+interface TextMetadataRecord { from: number; to: number; commentFrom: number; source: string; ranges: ColorRange[]; raw: string }
+/** 只认 AST 顶层独立、规范编码的记录；隐藏不依赖是否仍紧邻原段落。 */
+export function nativeTextOwnedRecords(text: string): TextMetadataRecord[] {
+  if (text.length > MAX_TEXT) return [];
+  const records: TextMetadataRecord[] = [];
+  for (const span of nativeTextMetadataRecords(text)) {
+    const separator = /^(?:\r\n|\n)*/.exec(text.slice(span.from, span.to))![0];
+    const commentFrom = span.from + separator.length, raw = text.slice(commentFrom, span.to);
+    if (!raw.startsWith(PREFIX) || !raw.endsWith(" -->")) continue;
+    try {
+      const data = JSON.parse(raw.slice(PREFIX.length, -4));
+      if (!data || Object.keys(data).sort().join() !== "ranges,source,version" || data.version !== 1 || typeof data.source !== "string" || encodeNativeTextMetadata(data.source, data.ranges) !== raw) continue;
+      records.push({ ...span, commentFrom, source: data.source, ranges: data.ranges, raw });
+    } catch { /* 损坏或未知版本保持可见，不把用户内容当成内部记录。 */ }
+  }
+  return records;
+}
+
+function moveTextRecord(text: string, block: NativeTextBlock, record: TextMetadataRecord): Array<{ from: number; to: number; insert: string }> {
+  if (record.from <= block.to) return [];
+  const insert = block.eol + block.eol + record.raw;
+  const output = text.slice(0, block.to) + insert + text.slice(block.to, record.from) + text.slice(record.to);
+  // 只移动内部记录：引用、列表紧凑性和所有用户文字必须保持相同 Markdown 语义。
+  if (nativeTextDocumentShape(text) !== nativeTextDocumentShape(output)) return [];
+  return [{ from: block.to, to: block.to, insert }, { from: record.from, to: record.to, insert: "" }];
+}
+
+/** 显式恢复仅看记录之前最近的正文块，并要求全文无重复快照；不搜索远处文字猜归属。 */
+export function repairNativeTextMetadata(text: string): string {
+  const records = nativeTextOwnedRecords(text), blocks = scanNativeText(text);
+  const edits: Array<{ from: number; to: number; insert: string }> = [];
+  for (const record of records) {
+    const block = blocks.filter((item) => item.to <= record.from).at(-1);
+    if (!block?.supported || block.status !== "none" || block.source !== record.source || !nativeTextQuoteGap(text, block.to, record.from)) continue;
+    if (blocks.filter((item) => item.source === record.source).length !== 1 || records.filter((item) => item.source === record.source).length !== 1) continue;
+    edits.push(...moveTextRecord(text, block, record));
+  }
+  let output = text;
+  for (const edit of edits.sort((a, b) => b.from - a.from)) output = output.slice(0, edit.from) + edit.insert + output.slice(edit.to);
+  return output;
+}
+
 const cache = new Map<string, NativeTextBlock[]>();
 /** 两个新增换行只属于记录；完整顶层块之外插入，不改变列表内部紧凑性。 */
 export function scanNativeText(text: string): NativeTextBlock[] {
@@ -95,9 +137,18 @@ export function formatNativeText(text: string, from: number, to: number, format:
 }
 /** 仅原块结构保持完整时同步快照。分裂、合并、未知结构不猜测迁移，保留旧记录供重置。 */
 export function nativeTextMetadataChanges(before: string, after: string, changes: ChangeSet): Array<{ from: number; to: number; insert: string }> {
-  const next = scanNativeText(after), edits: Array<{ from: number; to: number; insert: string }> = [];
+  const next = scanNativeText(after), records = nativeTextOwnedRecords(after), edits: Array<{ from: number; to: number; insert: string }> = [];
   for (const old of scanNativeText(before)) {
     if (old.status !== "valid") continue;
+    // 原始关联已由事务证明，不做内容搜索；只在原块和原记录字节都完整时把插入的新块移到记录后。
+    const original = next.find((item) => item.from === changes.mapPos(old.from, -1) && item.source === old.source && item.supported);
+    const record = records.find((item) => item.commentFrom === changes.mapPos(old.commentFrom, 1) && item.raw === before.slice(old.commentFrom, old.metadataTo));
+    let recordTouched = false;
+    changes.iterChangedRanges((from, to) => { if (from < old.metadataTo && to > old.commentFrom || from >= old.commentFrom && from < old.metadataTo) recordTouched = true; });
+    if (!recordTouched && original?.status === "none" && record && original.to < record.from) {
+      const moved = moveTextRecord(after, original, record);
+      if (moved.length) { edits.push(...moved); continue; }
+    }
     let touched = false, unsafe = false;
     changes.iterChangedRanges((from, to) => { if (from > old.to && from < old.metadataTo || to > old.to && from < old.metadataTo) unsafe = true; if (from >= old.from && to <= old.to) touched = true; });
     if (unsafe || !touched) continue;
@@ -107,7 +158,7 @@ export function nativeTextMetadataChanges(before: string, after: string, changes
     if (!validRanges(ranges, block.source)) continue;
     edits.push({ from: block.commentFrom, to: block.metadataTo, insert: encodeNativeTextMetadata(block.source, ranges) });
   }
-  return edits;
+  return edits.sort((a, b) => a.from - b.from);
 }
 export const nativeTextColorTransactions = EditorState.transactionFilter.of((transaction) => {
   if (!transaction.docChanged || !(transaction.isUserEvent("input") || transaction.isUserEvent("delete") || transaction.isUserEvent("indent"))) return transaction;
@@ -116,7 +167,7 @@ export const nativeTextColorTransactions = EditorState.transactionFilter.of((tra
   return changes.length ? [transaction, { changes, sequential: true }] : transaction;
 });
 export function createNativeTextMetadataField(live: (state: EditorState) => boolean): StateField<DecorationSet> {
-  const ranges = (state: EditorState) => scanNativeText(state.doc.toString()).filter((block) => block.status === "valid" || block.status === "stale");
+  const ranges = (state: EditorState) => nativeTextOwnedRecords(state.doc.toString()).map((record) => ({ ...record, metadataTo: record.to }));
   const decorations = (state: EditorState) => live(state) ? Decoration.set(ranges(state).map((block) => Decoration.replace({ block: true }).range(block.commentFrom, block.metadataTo)), true) : Decoration.none;
   return StateField.define({ create: decorations, update: (value, tr) => tr.docChanged || live(tr.state) !== live(tr.startState) ? decorations(tr.state) : value,
     provide: (field) => [EditorView.decorations.from(field), EditorView.atomicRanges.of((view) => view.state.field(field)), EditorState.changeFilter.of((tr) => {
@@ -124,7 +175,7 @@ export function createNativeTextMetadataField(live: (state: EditorState) => bool
       let allowed = true; const blocks = ranges(tr.startState);
       const text = tr.startState.doc.toString();
       // 记录后的首个换行维持独立 HTML 注释行；删除它会把下一段拼到注释结束符后。
-      tr.changes.iterChangedRanges((from, to) => { if (blocks.some((block) => from < block.metadataTo + (/^(?:\r\n|\n)/.exec(text.slice(block.metadataTo))?.[0].length ?? 0) && to > block.to)) allowed = false; }); return allowed;
+      tr.changes.iterChangedRanges((from, to) => { if (blocks.some((block) => from < block.metadataTo + (/^(?:\r\n|\n)/.exec(text.slice(block.metadataTo))?.[0].length ?? 0) && to > block.from)) allowed = false; }); return allowed;
     })]
   });
 }

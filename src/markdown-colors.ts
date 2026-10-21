@@ -721,6 +721,19 @@ export function nativeTextMetadataRecords(text: string): Array<{ from: number; t
 }
 
 
+/** 失联记录只允许跨过完整顶层引用；不跨其他段落、代码、HTML 或不完整语法。 */
+export function nativeTextQuoteGap(text: string, from: number, to: number): boolean {
+  if (to <= from || to - from > 200_000) return false;
+  const nodes = (parseMarkdown(text).children ?? []).filter((node) => position(node).from < to && position(node).to > from);
+  if (!nodes.length || nodes.some((node) => node.type !== "blockquote" || position(node).from < from || position(node).to > to)) return false;
+  let cursor = from;
+  for (const node of nodes) {
+    if (text.slice(cursor, position(node).from).trim()) return false;
+    cursor = position(node).to;
+  }
+  return !text.slice(cursor, to).trim();
+}
+
 /** 插入记录前后核对实际 Markdown 树；只忽略自有独立记录，保留列表 spread 等语义字段。 */
 export function nativeTextDocumentShape(text: string): string {
   const clean = (node: MdNode): unknown => {
