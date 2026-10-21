@@ -781,6 +781,12 @@ function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRan
     if (!node.position) { for (const child of node.children ?? []) visit(child, quoteDepth); return; }
     const { from, to } = position(node), raw = text.slice(from, to);
     if (node.type === "html" || protectedRanges.some((range) => from >= range.from && to <= range.to)) return;
+    if (node.type === "text") {
+      // 仅隐藏已由正文解码单元确认的转义引导符；被转义的星号、反斜杠等仍是用户正文。
+      for (const unit of markdownTextUnits(text, node)) {
+        if (unit.to - unit.from === 2 && text[unit.from] === "\\" && text[unit.from + 1] === unit.value) add(unit.from, unit.from + 1);
+      }
+    }
     if (["strong", "emphasis", "delete"].includes(node.type) && node.children?.length) {
       add(from, position(node.children[0]).from); add(position(node.children.at(-1)!).to, to);
     } else if (node.type === "inlineCode") {

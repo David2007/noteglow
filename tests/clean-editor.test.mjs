@@ -12,8 +12,8 @@ test('exact AST delimiters disappear while ordinary content and list markers rem
  assert.equal(visible('***nested*** and ``a`b``'),'nested and a`b');
  assert.equal(visible('Heading\n======='),'Heading\n');
 });
-test('code body, YAML, HTML, escaped syntax and unsupported links remain literal',()=>{
- for(const text of ['```go\n**literal**','    **literal**','\\*literal\\*','---\nname: "**literal**"\n---','<div>**literal**</div>','[label][ref]\n\n[ref]: https://example.test','[[wiki]]','![alt](image.png)'])assert.equal(visible(text),text,text);
+test('code body, YAML, HTML and unsupported links remain literal',()=>{
+ for(const text of ['```go\n**literal**','    **literal**','---\nname: "**literal**"\n---','<div>**literal**</div>','[label][ref]\n\n[ref]: https://example.test','[[wiki]]','![alt](image.png)'])assert.equal(visible(text),text,text);
  assert.equal(visible('> `x > 0`'),'x > 0');
  assert.equal(visible('- **item**'),'- item');
 });
@@ -99,4 +99,27 @@ test('escaped angle destination terminator is included in the exact editable URL
  assert.equal(source.slice(link.addressFrom,link.addressTo),'<a\\>b>');
  const updated=source.slice(0,link.addressFrom)+markdownLinkAddress('https://new.test')+source.slice(link.addressTo);
  assert.equal(updated,'[label](<https://new.test> "title")');
+});
+
+
+test('confirmed text escapes hide only their introducer and preserve literal punctuation and odd/even runs',()=>{
+ for(const [source,expected] of [
+  [String.raw`\*literal\*`,'*literal*'],
+  [String.raw`\\`,'\\'],
+  [String.raw`\\\*`,'\\*'],
+  [String.raw`\\\\`,'\\\\'],
+  [String.raw`\q`,'\\q'],
+  [String.raw`\***bold**。\*tail`,'*bold。*tail'],
+  [String.raw`\[label\]`,'[label]']
+ ]) assert.equal(visible(source),expected,source);
+ for(const source of ['`'+String.raw`\*code\*`+'`','```\n'+String.raw`\*code\*`+'\n```','<div>'+String.raw`\*html\*`+'</div>','---\nvalue: '+String.raw`\*yaml\*`+'\n---']) {
+  const {ranges}=cleanMarkdownSyntax(source);
+  for(const index of [...source.matchAll(/\\/g)].map(match=>match.index)) assert.ok(!ranges.some(r=>r.from<=index&&r.to>index),source);
+ }
+});
+test('escape display decorations never rewrite source and Source mode reveals the original backslashes',()=>{
+ let live=true;const source=String.raw`\*literal\*`,extension=cleanEditorExtension(()=>live),field=extension[0];
+ let state=EditorState.create({doc:source,extensions:[extension]});assert.equal(state.field(field).decorations.size,2);assert.equal(state.doc.toString(),source);
+ state=state.update({selection:{anchor:2}}).state;assert.equal(state.doc.toString(),source);assert.equal(state.field(field).decorations.size,2);
+ live=false;state=state.update({}).state;assert.equal(state.field(field).decorations.size,0);assert.equal(state.doc.toString(),source);
 });
