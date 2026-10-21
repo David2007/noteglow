@@ -552,10 +552,18 @@ class NoteColorController {
     const codeElements = el.matches("code") ? [el] : Array.from(el.querySelectorAll<HTMLElement>("pre > code"));
     for (const code of codeElements) {
       if (code.parentElement?.matches('pre[data-codex-code="1"]')) continue;
+      // 代码和正文采用不同的颜色记录，分别记录结果；正文没有 section 不能否定代码已着色。
+      code.dataset.codexNoteCodeColorStatus = "no-colors";
+      if (!blocks.length) continue;
       const info = context.getSectionInfo(code);
-      if (!info || info.text !== text) continue;
-      const candidates = blocks.filter((block) => block.line === info.lineStart && block.status === "valid");
-      if (candidates.length === 1) paintNativeCodeElement(code, candidates[0]);
+      if (!info) { code.dataset.codexNoteCodeColorStatus = "no-source-section"; continue; }
+      if (info.text !== text) { code.dataset.codexNoteCodeColorStatus = "source-snapshot-mismatch"; continue; }
+      const candidates = blocks.filter((block) => block.line === info.lineStart);
+      if (candidates.length !== 1) { code.dataset.codexNoteCodeColorStatus = "no-matching-block"; continue; }
+      const block = candidates[0];
+      if (block.status !== "valid") { code.dataset.codexNoteCodeColorStatus = block.status; continue; }
+      if (!block.ranges.length) continue;
+      code.dataset.codexNoteCodeColorStatus = paintNativeCodeElement(code, block) ? "applied" : "rendered-text-mismatch";
     }
     const legacy = this.data.notes[context.sourcePath];
     const nativeRanges = text.includes("<!-- noteglow-text-colors:") ? nativeTextColorRanges(text) : [];
@@ -615,8 +623,6 @@ class ColoredSection extends MarkdownRenderChild {
   private colorObserver: MutationObserver | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private settleTimer: ReturnType<typeof setTimeout> | null = null;
-  private warningTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastWarning = "";
   private stopped = false;
   constructor(el: HTMLElement, private readonly context: MarkdownPostProcessorContext, private readonly owner: NoteColorController, private readonly source: string) { super(el); }
   onload(): void {
@@ -635,7 +641,6 @@ class ColoredSection extends MarkdownRenderChild {
     this.colorObserver?.disconnect();
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     if (this.settleTimer) clearTimeout(this.settleTimer);
-    if (this.warningTimer) clearTimeout(this.warningTimer);
     this.owner.detachReader(this);
     this.clear();
   }
@@ -651,16 +656,8 @@ class ColoredSection extends MarkdownRenderChild {
     this.owner.bindRenderedCode(this.containerEl, this.context);
     try { this.owner.renderReading(this.containerEl, this.context, this.source); }
     finally { this.colorObserver?.observe(this.containerEl, { childList: true, characterData: true, subtree: true }); }
-    if (this.warningTimer) clearTimeout(this.warningTimer);
-    const status = this.containerEl.dataset.codexNoteColorStatus ?? "unknown";
-    if (this.hasCode() && /mismatch|bounds|no-source/.test(status) && status !== this.lastWarning) {
-      this.warningTimer = setTimeout(() => {
-        this.warningTimer = null;
-        if (this.stopped || this.containerEl.dataset.codexNoteColorStatus !== status) return;
-        this.lastWarning = status;
-        new Notice(`代码颜色暂未定位（${status}），为保护代码原文未进行模糊着色。`, 7000);
-      }, 700);
-    }
+    // 后台渲染也覆盖聊天回复等没有源码 section 的内容，只保留 DOM 诊断结果。
+    // 主动改色失败仍由命令入口提示，不能把每个渲染块的跳过状态都变成通知。
   }
   private hasCode(): boolean { return this.containerEl.matches("pre,code") || Boolean(this.containerEl.querySelector("pre,code")); }
 }
