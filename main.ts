@@ -10,7 +10,9 @@ import { randomUUID } from "node:crypto";
 import { type ContextAttachment, validateAttachments } from "./src/context";
 import { readModels, type CodexModel } from "./src/models";
 import { registerNoteColors } from "./src/note-colors";
-import { editorInfoField } from "obsidian";
+import { cleanEditorExtension } from "./src/clean-editor";
+import { registerLinkEditor } from "./src/link-editor";
+import { editorInfoField, editorLivePreviewField } from "obsidian";
 import { codeFormatExtension } from "./src/code-format-editor";
 import { slashCommandExtension } from "./src/editor-shortcuts";
 import { registerNoteOutline } from "./src/note-outline";
@@ -89,6 +91,8 @@ export default class CodexWorkspacePlugin extends Plugin {
     await registerNoteColors(this);
     registerNoteOutline(this);
     this.registerEditorExtension(slashCommandExtension);
+    this.registerEditorExtension(cleanEditorExtension((state) => this.settings.cleanLivePreview && state.field(editorLivePreviewField, false) === true));
+    registerLinkEditor(this);
     this.registerEditorExtension(codeFormatExtension({
       settings: () => this.settings,
       path: (view) => this.unloaded ? null : view.state.field(editorInfoField, false)?.file?.path ?? null

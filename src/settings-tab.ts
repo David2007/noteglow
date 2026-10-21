@@ -50,6 +50,13 @@ export class CodexSettingTab extends PluginSettingTab {
         })
       );
 
+    new Setting(containerEl).setName("Live Preview 隐藏 Markdown 语法")
+      .setDesc("光标进入也隐藏标题、粗斜体、代码围栏、引用和普通链接标记；源码模式保留原文。")
+      .addToggle((toggle) => toggle.setValue(this.plugin.settings.cleanLivePreview).onChange(async (value) => {
+        this.plugin.settings.cleanLivePreview = value;
+        this.plugin.app.workspace.updateOptions();
+        await this.plugin.persistSettings();
+      }));
     new Setting(containerEl).setName("粘贴代码时自动格式化")
       .setDesc("普通代码块和 /code 内粘贴时识别 Go、Python、Java；已有颜色记录的块保留原文。")
       .addToggle((toggle) => toggle.setValue(this.plugin.settings.autoFormatCode).onChange(async (value) => {

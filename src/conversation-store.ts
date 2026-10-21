@@ -24,6 +24,7 @@ export function loadPluginSettings(raw: unknown, options: LoadOptions = {}): Loa
   const makeId = options.makeId ?? createId;
   const source = isRecord(raw) ? raw : {};
   const base = {
+    cleanLivePreview: typeof source.cleanLivePreview === "boolean" ? source.cleanLivePreview : true,
     autoFormatCode: typeof source.autoFormatCode === "boolean" ? source.autoFormatCode : true,
     gofmtPath: asString(source.gofmtPath) ?? "",
     blackPath: asString(source.blackPath) ?? "",

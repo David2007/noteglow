@@ -24,6 +24,7 @@ export interface Conversation {
 }
 
 export interface PluginSettings {
+  cleanLivePreview: boolean;
   autoFormatCode: boolean;
   gofmtPath: string;
   blackPath: string;

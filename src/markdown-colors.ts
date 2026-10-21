@@ -762,3 +762,117 @@ export function isPlainMarkdownLine(text: string, from: number, to: number): boo
   const model = buildModel(text, []);
   return ![...model.protected, ...model.unknownHtml].some((range) => from < range.to && to > range.from);
 }
+
+export interface MarkdownSyntaxRange { from: number; to: number }
+export interface MarkdownInlineLink extends MarkdownSyntaxRange { addressFrom: number; addressTo: number; url: string }
+/** 只隐藏 AST 已确认的语法；所有位置仍指向原文，不替换正文、列表标记或代码里的符号。 */
+export function cleanMarkdownSyntax(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[] } {
+  try { return cleanMarkdownSyntaxUnchecked(text); } catch { return { ranges: [], links: [] }; }
+}
+function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[] } {
+  if (text.length > MAX_CHARS) return { ranges: [], links: [] };
+  const model = buildModel(text, []), ast = model.ast;
+  const protectedRanges = [...model.protected, ...model.unknownHtml];
+  const ranges: MarkdownSyntaxRange[] = [], links: MarkdownInlineLink[] = [];
+  const add = (from: number, to: number): void => {
+    if (to > from && !protectedRanges.some((range) => from < range.to && to > range.from)) ranges.push({ from, to });
+  };
+  const visit = (node: MdNode, quoteDepth = 0): void => {
+    if (!node.position) { for (const child of node.children ?? []) visit(child, quoteDepth); return; }
+    const { from, to } = position(node), raw = text.slice(from, to);
+    if (node.type === "html" || protectedRanges.some((range) => from >= range.from && to <= range.to)) return;
+    if (["strong", "emphasis", "delete"].includes(node.type) && node.children?.length) {
+      add(from, position(node.children[0]).from); add(position(node.children.at(-1)!).to, to);
+    } else if (node.type === "inlineCode") {
+      const open = /^`+/.exec(raw)?.[0];
+      if (open && raw.endsWith(open) && raw.length > open.length * 2) { add(from, from + open.length); add(to - open.length, to); }
+      return;
+    } else if (node.type === "heading") {
+      const open = /^#{1,6}(?:[ \t]+|$)/.exec(raw);
+      if (open) {
+        add(from, from + open[0].length);
+        const close = /[ \t]+#+[ \t]*$/.exec(raw); if (close) add(from + close.index, to);
+      } else {
+        const lineStart = raw.lastIndexOf("\n") + 1;
+        if (lineStart > 0) {
+          let content = lineStart;
+          // Setext 的后续物理行保留祖先引用标记，先按 AST 层数越过，不能把 > 当下划线正文。
+          for (let depth = 0; depth < quoteDepth; depth++) {
+            const prefix = /^ {0,3}>[ \t]?/.exec(raw.slice(content));
+            if (!prefix) break;
+            content += prefix[0].length;
+          }
+          if (/^[ \t]*(?:=+|-+)[ \t]*$/.test(raw.slice(content))) add(from + content, to);
+        }
+      }
+    } else if (node.type === "code") {
+      const open = /^(`{3,}|~{3,})[^\r\n]*(?=\r?\n)/.exec(raw);
+      const closeAt = raw.lastIndexOf("\n") + 1, close = raw.slice(closeAt);
+      if (open && new RegExp(`^ {0,3}${open[1][0]}{${open[1].length},}[ \\t]*$`).test(close)) {
+        add(from, from + open[0].length); add(from + closeAt, to);
+      }
+      return;
+    } else if (node.type === "blockquote") {
+      let offset = from, firstLine = true;
+      for (const line of raw.split("\n")) {
+        // 首行 node.from 已在本层 >；后续物理行先越过祖先容器，每层只消费一个 >。
+        // 代码正文中的 > 没有 blockquote AST 节点，不能被贪婪前缀正则吞掉。
+        let prefixOffset = 0;
+        const ancestors = firstLine ? 0 : quoteDepth;
+        for (let depth = 0; depth <= ancestors; depth++) {
+          const prefix = /^ {0,3}>[ \t]?/.exec(line.slice(prefixOffset));
+          if (!prefix) break;
+          if (depth === ancestors) add(offset + prefixOffset, offset + prefixOffset + prefix[0].length);
+          prefixOffset += prefix[0].length;
+        }
+        firstLine = false; offset += line.length + 1;
+      }
+    } else if (node.type === "link" && node.children?.length && raw.startsWith("[")) {
+      const innerFrom = position(node.children[0]).from, innerTo = position(node.children.at(-1)!).to;
+      const suffix = text.slice(innerTo, to);
+      if (suffix.startsWith("](") && suffix.endsWith(")")) {
+        let start = innerTo + 2; while (/[ \t\r\n]/.test(text[start] ?? "") && start < to) start++;
+        let end = start;
+        if (text[start] === "<") {
+          // CommonMark 的反斜杠转义可能包含 >；仅未转义结束符属于 destination 边界。
+          end = start + 1;
+          while (end < to - 1) {
+            if (text[end] === "\\" && end + 1 < to - 1) { end += 2; continue; }
+            if (text[end++] === ">") break;
+          }
+        }
+        else {
+          let depth = 0;
+          for (; end < to - 1; end++) {
+            const character = text[end];
+            if (character === "\\") { end++; continue; }
+            if (/\s/.test(character) && depth === 0) break;
+            if (character === "(") depth++;
+            if (character === ")") { if (!depth) break; depth--; }
+          }
+        }
+        if (end >= start && end <= to - 1) {
+          add(from, innerFrom); add(innerTo, to);
+          // 空 destination 后的引号是 title，不把 title 的第一词误当地址；视觉仍隐藏语法。
+          if (node.url !== "" || start === to - 1 || text.slice(start, end) === "<>") links.push({ from, to, addressFrom: start, addressTo: end, url: String(node.url ?? "") });
+        }
+      }
+    }
+    for (const child of node.children ?? []) visit(child, quoteDepth + (node.type === "blockquote" ? 1 : 0));
+  };
+  visit(ast);
+  // 嵌套 emphasis/quote 可能相接或重合，先合并以避免 CM 重复 replace 范围。
+  const merged: MarkdownSyntaxRange[] = [];
+  for (const range of ranges.sort((a, b) => a.from - b.from || a.to - b.to)) {
+    const last = merged.at(-1);
+    if (last && range.from <= last.to) last.to = Math.max(last.to, range.to); else merged.push({ ...range });
+  }
+  return { ranges: merged, links };
+}
+
+/** 地址是单值，提交时整体校验；用尖括号和百分号编码防止输入逃逸为 Markdown 结构。 */
+export function markdownLinkAddress(value: string): string | null {
+  const address = value.trim();
+  if (!address || address.length > 8192 || /[\u0000-\u001f\u007f<>]/.test(value)) return null;
+  return "<" + address.replace(/&/g, "&amp;").replace(/\\/g, "%5C").replace(/ /g, "%20") + ">";
+}
