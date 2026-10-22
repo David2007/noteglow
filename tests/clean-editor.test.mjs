@@ -155,7 +155,7 @@ test('Backspace at quoted content start removes only one nested level and each s
 });
 test('quote retreat preserves inline markup, whitespace, adjacent lines and actual code contents',()=>{
  for(const [source,word,expected] of [
-  ['>  >  **重点**','重点','>  **重点**'],
+  ['>  >  **重点**','重点','>   **重点**'],
   ['> a\n> b\n> c','b','> a\n\nb\n> c'],
   ['> > `x > 0`','x','> `x > 0`'],
   ['> > ','', '> '],
@@ -163,6 +163,7 @@ test('quote retreat preserves inline markup, whitespace, adjacent lines and actu
  ]) {
   const editor=quoteEditor(source,word?source.indexOf(word):source.length);
   assert.equal(editor.backspace(),true,source);assert.equal(editor.view.state.doc.toString(),expected);
+  if(word==='重点'){assert.equal(textQuoteDepth(expected,word),1);assert.equal(visible(expected).trim(),'重点');}
   assert.equal(undo(editor.view),true);assert.equal(editor.view.state.doc.toString(),source);
  }
  for(const source of ['plain','> word','```\n> code\n```','    > code']) {
