@@ -12,7 +12,7 @@ export function slashCommandEdit(text: string, cursor: number): SlashEdit | null
   const newline = text.indexOf("\n", cursor);
   const to = newline < 0 ? text.length : newline;
   const line = text.slice(from, to).replace(/\r$/, "");
-  if (cursor !== from + line.length || !/^ {0,3}\/(code|bg|h[1-6])$/.test(line)) return null;
+  if (cursor !== from + line.length || !/^ {0,3}\/(code|bg|mermaid|h[1-6])$/.test(line)) return null;
   const commandFrom = from + line.indexOf("/");
   try { if (!isPlainMarkdownLine(text, commandFrom, from + line.length)) return null; }
   catch { return null; }
@@ -26,6 +26,11 @@ export function slashCommandEdit(text: string, cursor: number): SlashEdit | null
     // 复用独立行保护与撤销事务；光标留在标题前缀后，继续输入标题正文。
     const marker = "#".repeat(Number(heading[1])) + " ";
     return { from, to: from + line.length, insert: prefix + marker + suffix, cursor: from + prefix.length + marker.length };
+  }
+  if (line.endsWith("/mermaid")) {
+    // 使用宿主原生 Mermaid 围栏；有效示例可立即预览，光标进入源码首行。
+    const block = ["```mermaid", "flowchart TD", "    A[开始] --> B[结束]", "```"].join(eol);
+    return { from, to: from + line.length, insert: prefix + block + suffix, cursor: from + prefix.length + 10 + eol.length };
   }
   const code = line.endsWith("/code");
   const block = code ? ["```", "", "```"].join(eol) : ["| 标题 1 | 标题 2 |", "| --- | --- |", "|  |  |", "|  |  |"].join(eol);

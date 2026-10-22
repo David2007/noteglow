@@ -13,6 +13,40 @@ function expand(source, command) {
  return { ...edit, text: source.slice(0, edit.from) + edit.insert + source.slice(edit.to) };
 }
 
+test('mermaid inserts an editable native diagram and preserves line endings and surrounding prose', () => {
+ for (const eol of ['\n', '\r\n']) {
+  const block = ['```mermaid', 'flowchart TD', '    A[开始] --> B[结束]', '```'].join(eol);
+  const result = expand(`before${eol}  /mermaid${eol}after`, '/mermaid');
+  assert.equal(result.text, `before${eol}${eol}${block}${eol}${eol}after`);
+  assert.equal(result.text.slice(result.cursor, result.cursor + 12), 'flowchart TD');
+  assert.equal(result.cursor, `before${eol}${eol}\`\`\`mermaid${eol}`.length);
+ }
+ const standalone = expand('/mermaid', '/mermaid');
+ assert.equal(standalone.text, '```mermaid\nflowchart TD\n    A[开始] --> B[结束]\n```');
+ assert.equal(standalone.cursor, 11);
+});
+
+test('mermaid lookalikes and protected Markdown remain ordinary text', () => {
+ for (const source of ['/Mermaid', '/mermaid ', '/mermaid x', 'hello /mermaid', '    /mermaid', '> /mermaid', '- /mermaid', '```mermaid\n/mermaid\n```', '~~~\n/mermaid', '<!--\n/mermaid\n-->', '---\n/mermaid\n---', '<div>\n/mermaid\n</div>']) {
+  const at = source.indexOf('/mermaid');
+  assert.equal(slashCommandEdit(source, at < 0 ? source.length : at + 8), null, source);
+ }
+});
+
+test('mermaid conversion undo and redo preserve the diagram source cursor', () => {
+ let state = EditorState.create({ doc: '/mermaid', selection: { anchor: 8 }, extensions: [history()] });
+ const view = { composing: false, get state() { return state; }, dispatch(spec) { state = spec instanceof Transaction ? spec.state : state.update(spec).state; } };
+ assert.equal(expandSlashCommand(view), true);
+ const diagram = state.doc.toString();
+ assert.equal(state.selection.main.head, 11);
+ assert.equal(undo(view), true);
+ assert.equal(state.doc.toString(), '/mermaid');
+ assert.equal(state.selection.main.head, 8);
+ assert.equal(redo(view), true);
+ assert.equal(state.doc.toString(), diagram);
+ assert.equal(state.selection.main.head, 11);
+});
+
 test('heading commands support all six levels and preserve surrounding paragraphs and CRLF', () => {
  for (let level = 1; level <= 6; level++) {
   const command = `/h${level}`, marker = '#'.repeat(level) + ' ';
