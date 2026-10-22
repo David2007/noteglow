@@ -764,18 +764,22 @@ export function isPlainMarkdownLine(text: string, from: number, to: number): boo
 }
 
 export interface MarkdownSyntaxRange { from: number; to: number }
+export interface MarkdownQuoteLine { from: number; depth: number }
 export interface MarkdownQuotePrefix extends MarkdownSyntaxRange { blockFrom: number }
 export interface MarkdownInlineLink extends MarkdownSyntaxRange { addressFrom: number; addressTo: number; url: string }
 /** 只隐藏 AST 已确认的语法；所有位置仍指向原文，不替换正文、列表标记或代码里的符号。 */
-export function cleanMarkdownSyntax(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[]; quotes: MarkdownQuotePrefix[] } {
-  try { return cleanMarkdownSyntaxUnchecked(text); } catch { return { ranges: [], links: [], quotes: [] }; }
+export function cleanMarkdownSyntax(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[]; quotes: MarkdownQuotePrefix[]; quoteLines: MarkdownQuoteLine[] } {
+  try { return cleanMarkdownSyntaxUnchecked(text); } catch { return { ranges: [], links: [], quotes: [], quoteLines: [] }; }
 }
-function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[]; quotes: MarkdownQuotePrefix[] } {
-  if (text.length > MAX_CHARS) return { ranges: [], links: [], quotes: [] };
+function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[]; quotes: MarkdownQuotePrefix[]; quoteLines: MarkdownQuoteLine[] } {
+  if (text.length > MAX_CHARS) return { ranges: [], links: [], quotes: [], quoteLines: [] };
   const model = buildModel(text, []), ast = model.ast;
   const protectedRanges = [...model.protected, ...model.unknownHtml];
   const ranges: MarkdownSyntaxRange[] = [], links: MarkdownInlineLink[] = [], quotes: MarkdownQuotePrefix[] = [];
   const quoteProtectedLines: MarkdownSyntaxRange[] = [];
+  const quoteLines = new Map<number, number>();
+  // 宿主整体渲染的容器继续由宿主排版，不在其源码行叠加 gutter。
+  const quoteDisplayExclusions = [...model.unknownHtml, ...model.protected.filter((range) => range.kind === "公式" && text.startsWith("$$", range.from))];
   const add = (from: number, to: number): void => {
     if (to > from && !protectedRanges.some((range) => from < range.to && to > range.from)) ranges.push({ from, to });
   };
@@ -783,6 +787,8 @@ function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRan
     if (!node.position) { for (const child of node.children ?? []) visit(child, quoteDepth); return; }
     const { from, to } = position(node), raw = text.slice(from, to);
     if (node.type === "html" || protectedRanges.some((range) => from >= range.from && to <= range.to)) return;
+    // 列表悬挂缩进由宿主按列表标记测量；不能被普通引用的固定 gutter 覆盖。
+    if (node.type === "list") quoteDisplayExclusions.push({ from, to });
     if (node.type === "text") {
       // 仅隐藏已由正文解码单元确认的转义引导符；被转义的星号、反斜杠等仍是用户正文。
       for (const unit of markdownTextUnits(text, node)) {
@@ -823,8 +829,12 @@ function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRan
       }
       return;
     } else if (node.type === "blockquote") {
+      if (/^>[ \t]*\[![^\]]+\]/.test(raw)) quoteDisplayExclusions.push({ from, to });
       let offset = from, firstLine = true;
       for (const line of raw.split("\n")) {
+        // 显示深度来自 AST，不随光标或宿主的活动行 widget 改变；代码里的字面 > 不会增加层级。
+        const lineFrom = text.lastIndexOf("\n", offset - 1) + 1;
+        quoteLines.set(lineFrom, Math.max(quoteLines.get(lineFrom) ?? 0, quoteDepth + 1));
         // 首行 node.from 已在本层 >；后续物理行先越过祖先容器，每层只消费一个 >。
         // 代码正文中的 > 没有 blockquote AST 节点，不能被贪婪前缀正则吞掉。
         let prefixOffset = 0;
@@ -885,7 +895,7 @@ function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRan
     const last = merged.at(-1);
     if (last && range.from <= last.to) last.to = Math.max(last.to, range.to); else merged.push({ ...range });
   }
-  return { ranges: merged, links, quotes: quotes.filter((quote) => !quoteProtectedLines.some((range) => quote.from >= range.from && quote.from <= range.to)) };
+  return { ranges: merged, links, quotes: quotes.filter((quote) => !quoteProtectedLines.some((range) => quote.from >= range.from && quote.from <= range.to)), quoteLines: [...quoteLines].filter(([from]) => !quoteDisplayExclusions.some((range) => from >= text.lastIndexOf("\n", range.from - 1) + 1 && from <= range.to)).map(([from, depth]) => ({ from, depth })).sort((a, b) => a.from - b.from) };
 }
 
 /** 地址是单值，提交时整体校验；用尖括号和百分号编码防止输入逃逸为 Markdown 结构。 */

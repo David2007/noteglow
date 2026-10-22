@@ -5,13 +5,23 @@ import { cleanMarkdownSyntax } from "./markdown-colors.ts";
 
 /** 保持 CM 原生语义样式，仅遮住分隔符；光标进入也不展开，Source mode 完全不提供装饰。 */
 export function cleanEditorExtension(enabled: (state: EditorState) => boolean): Extension {
-  const decorate = (state: EditorState): DecorationSet => enabled(state)
-    ? Decoration.set(cleanMarkdownSyntax(state.doc.toString()).ranges.map(({ from, to }) => Decoration.replace({}).range(from, to)), true)
-    : Decoration.none;
-  const field = StateField.define<{ active: boolean; decorations: DecorationSet }>({
-    create: (state) => ({ active: enabled(state), decorations: decorate(state) }),
-    update: (value, transaction) => transaction.docChanged || enabled(transaction.state) !== value.active ? { active: enabled(transaction.state), decorations: decorate(transaction.state) } : value,
-    provide: (value) => [EditorView.decorations.from(value, (entry) => entry.decorations), EditorView.atomicRanges.of((view) => view.state.field(value).decorations)]
+  const decorate = (state: EditorState): { decorations: DecorationSet; atomic: DecorationSet } => {
+    if (!enabled(state)) return { decorations: Decoration.none, atomic: Decoration.none };
+    const syntax = cleanMarkdownSyntax(state.doc.toString());
+    // 宿主会在活动行移除嵌套引用 widget；由同一个 AST 提供固定 gutter，避免焦点改变层级外观。
+    const replacements = syntax.ranges.map(({ from, to }) => Decoration.replace({}).range(from, to));
+    return { atomic: Decoration.set(replacements, true), decorations: Decoration.set([
+      ...replacements,
+      ...syntax.quoteLines.map(({ from, depth }) => Decoration.line({ attributes: {
+        class: "noteglow-quote-line",
+        style: `--noteglow-quote-depth: ${depth}`
+      } }).range(from))
+    ], true) };
+  };
+  const field = StateField.define<{ active: boolean; decorations: DecorationSet; atomic: DecorationSet }>({
+    create: (state) => ({ active: enabled(state), ...decorate(state) }),
+    update: (value, transaction) => transaction.docChanged || enabled(transaction.state) !== value.active ? { active: enabled(transaction.state), ...decorate(transaction.state) } : value,
+    provide: (value) => [EditorView.decorations.from(value, (entry) => entry.decorations), EditorView.atomicRanges.of((view) => view.state.field(value).atomic)]
   });
   return [field, Prec.highest(keymap.of([{ key: "Backspace", run: (view) => {
     const { state } = view, selection = state.selection;
@@ -47,7 +57,7 @@ export function cleanEditorExtension(enabled: (state: EditorState) => boolean): 
     if (!transaction.docChanged || !transaction.isUserEvent("delete") || !enabled(transaction.startState) || transaction.startState.selection.ranges.length !== 1 || !transaction.startState.selection.main.empty) return true;
     let allowed = true;
     // 普通 Backspace/Delete 不能无意切掉隐藏分隔符；明确选择或格式命令仍可移除格式。
-    transaction.changes.iterChangedRanges((from, to) => transaction.startState.field(field).decorations.between(from, to, (start, end) => { if (from < end && to > start) allowed = false; }));
+    transaction.changes.iterChangedRanges((from, to) => transaction.startState.field(field).atomic.between(from, to, (start, end) => { if (from < end && to > start) allowed = false; }));
     return allowed;
   })];
 }

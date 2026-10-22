@@ -232,3 +232,58 @@ test('quoted block code and implicit nested quote continuation stay with native 
   const editor=quoteEditor(source,source.indexOf(word));assert.equal(editor.backspace(),false,source);assert.equal(editor.view.state.doc.toString(),source);
  }
 });
+
+test('quote display depth follows AST across active lines, lazy continuation and quoted code',()=>{
+ for(const [source,depths] of [
+  ['> one\n> > two\n> > > three',[1,2,3]],
+  ['> > first\n> second',[2,2]],
+  ['> ```\n> > literal\n> ```',[1,1,1]],
+  ['> one\n>\n> two',[1,1,1]],
+  ['plain\n\n> one',[1]],
+ ]) {
+  const lines=cleanMarkdownSyntax(source).quoteLines;
+  assert.deepEqual(lines.map(line=>line.depth),depths,source);
+  for(const line of lines) assert.ok(line.from===0||source[line.from-1]==='\n');
+ }
+ for(const source of ['```\n> code\n```','    > code','> [!note]\n> body','> $$\n> x\n> $$','---\nvalue: >\n---']) assert.deepEqual(cleanMarkdownSyntax(source).quoteLines,[],source);
+});
+test('quote line gutters stay unchanged with cursor or multiselection and disappear in Source mode',()=>{
+ let live=true;
+ const source='> outer\n> > nested',extension=cleanEditorExtension(()=>live),field=extension[0];
+ let state=EditorState.create({doc:source,extensions:[EditorState.allowMultipleSelections.of(true),extension]});
+ const lines=state=>{
+  const result=[];
+  state.field(field).decorations.between(0,state.doc.length,(from,to,value)=>{
+   if(value.spec.attributes?.class==='noteglow-quote-line')result.push([from,to,value.spec.attributes.style]);
+  });
+  return result;
+ };
+ const expected=[[0,0,'--noteglow-quote-depth: 1'],[8,8,'--noteglow-quote-depth: 2']];
+ assert.deepEqual(lines(state),expected);
+ for(const selection of [{anchor:0},{anchor:8},{anchor:12},{anchor:source.length},{anchor:2,head:source.length},EditorSelection.create([EditorSelection.cursor(0),EditorSelection.cursor(12)])]) {
+  state=state.update({selection}).state;assert.deepEqual(lines(state),expected);assert.equal(state.doc.toString(),source);
+  state.field(field).atomic.between(0,state.doc.length,(from,to)=>assert.ok(to>from,'line decorations are not atomic cursor ranges'));
+ }
+ live=false;state=state.update({}).state;assert.deepEqual(lines(state),[]);assert.equal(state.field(field).atomic.size,0);assert.equal(state.doc.toString(),source);
+ live=true;state=state.update({}).state;assert.deepEqual(lines(state),expected);
+});
+
+test('list-containing and list-contained quotes preserve the native hanging indentation',()=>{
+ for(const source of ['> - item\n>   continuation','- > quote\n  > continuation'])assert.deepEqual(cleanMarkdownSyntax(source).quoteLines,[],source);
+ assert.deepEqual(cleanMarkdownSyntax('> paragraph\n> - item').quoteLines,[{from:0,depth:1}]);
+});
+test('quote gutters recompute depth after retreat and its Undo or Redo',()=>{
+ const source='> outer\n> > nested',extension=cleanEditorExtension(()=>true),field=extension[0];
+ let state=EditorState.create({doc:source,selection:{anchor:12},extensions:[history(),extension]});
+ const view={get state(){return state;},composing:false,dispatch(spec){state=spec.state??state.update(spec).state;}};
+ const depths=()=>{
+  const result=[];state.field(field).decorations.between(0,state.doc.length,(_from,_to,value)=>{
+   if(value.spec.attributes?.class==='noteglow-quote-line')result.push(value.spec.attributes.style);
+  });return result;
+ };
+ const before=['--noteglow-quote-depth: 1','--noteglow-quote-depth: 2'],after=['--noteglow-quote-depth: 1','--noteglow-quote-depth: 1'];
+ assert.deepEqual(depths(),before);
+ assert.equal(state.facet(keymap).flat().find(binding=>binding.key==='Backspace').run(view),true);assert.deepEqual(depths(),after);
+ assert.equal(undo(view),true);assert.deepEqual(depths(),before);assert.equal(state.doc.toString(),source);
+ assert.equal(redo(view),true);assert.deepEqual(depths(),after);assert.equal(state.doc.toString(),'> outer\n> nested');
+});

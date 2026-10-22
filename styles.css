@@ -130,3 +130,26 @@
 .noteglow-outline [hidden] { display: none !important; }
 .noteglow-outline-collapsed .noteglow-outline { border-right: 0; }
 .noteglow-outline-collapsed .noteglow-outline-header { padding: 0; }
+
+/* 简洁预览引用层级固定为 AST 深度，不依赖宿主只在非活动行创建的边框 widget。 */
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.noteglow-quote-line {
+  --noteglow-quote-step: 1em;
+  padding-inline-start: calc(var(--noteglow-quote-depth) * var(--noteglow-quote-step)) !important;
+  text-indent: 0 !important;
+}
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.noteglow-quote-line::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0;
+  bottom: 0;
+  width: calc(var(--noteglow-quote-depth) * var(--noteglow-quote-step));
+  border: 0;
+  background: repeating-linear-gradient(to right,
+    var(--blockquote-border-color) 0 var(--blockquote-border-thickness),
+    transparent var(--blockquote-border-thickness) var(--noteglow-quote-step));
+  pointer-events: none;
+}
+.markdown-source-view.mod-cm6.is-live-preview .noteglow-quote-line .cm-blockquote-border {
+  display: none;
+}
