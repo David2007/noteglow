@@ -764,16 +764,18 @@ export function isPlainMarkdownLine(text: string, from: number, to: number): boo
 }
 
 export interface MarkdownSyntaxRange { from: number; to: number }
+export interface MarkdownQuotePrefix extends MarkdownSyntaxRange { blockFrom: number }
 export interface MarkdownInlineLink extends MarkdownSyntaxRange { addressFrom: number; addressTo: number; url: string }
 /** 只隐藏 AST 已确认的语法；所有位置仍指向原文，不替换正文、列表标记或代码里的符号。 */
-export function cleanMarkdownSyntax(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[] } {
-  try { return cleanMarkdownSyntaxUnchecked(text); } catch { return { ranges: [], links: [] }; }
+export function cleanMarkdownSyntax(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[]; quotes: MarkdownQuotePrefix[] } {
+  try { return cleanMarkdownSyntaxUnchecked(text); } catch { return { ranges: [], links: [], quotes: [] }; }
 }
-function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[] } {
-  if (text.length > MAX_CHARS) return { ranges: [], links: [] };
+function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRange[]; links: MarkdownInlineLink[]; quotes: MarkdownQuotePrefix[] } {
+  if (text.length > MAX_CHARS) return { ranges: [], links: [], quotes: [] };
   const model = buildModel(text, []), ast = model.ast;
   const protectedRanges = [...model.protected, ...model.unknownHtml];
-  const ranges: MarkdownSyntaxRange[] = [], links: MarkdownInlineLink[] = [];
+  const ranges: MarkdownSyntaxRange[] = [], links: MarkdownInlineLink[] = [], quotes: MarkdownQuotePrefix[] = [];
+  const quoteProtectedLines: MarkdownSyntaxRange[] = [];
   const add = (from: number, to: number): void => {
     if (to > from && !protectedRanges.some((range) => from < range.to && to > range.from)) ranges.push({ from, to });
   };
@@ -812,6 +814,8 @@ function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRan
         }
       }
     } else if (node.type === "code") {
+      // 引用里的完整代码块不可通过单行退层拆开；只保护结构操作，隐藏装饰仍沿用原逻辑。
+      quoteProtectedLines.push({ from: text.lastIndexOf("\n", from - 1) + 1, to });
       const open = /^(`{3,}|~{3,})[^\r\n]*(?=\r?\n)/.exec(raw);
       const closeAt = raw.lastIndexOf("\n") + 1, close = raw.slice(closeAt);
       if (open && new RegExp(`^ {0,3}${open[1][0]}{${open[1].length},}[ \\t]*$`).test(close)) {
@@ -827,8 +831,17 @@ function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRan
         const ancestors = firstLine ? 0 : quoteDepth;
         for (let depth = 0; depth <= ancestors; depth++) {
           const prefix = /^ {0,3}>[ \t]?/.exec(line.slice(prefixOffset));
-          if (!prefix) break;
-          if (depth === ancestors) add(offset + prefixOffset, offset + prefixOffset + prefix[0].length);
+          if (!prefix) {
+            // 懒延续行的实际层级比显式 > 更多，交还宿主，避免一次退掉多层。
+            if (!firstLine && quoteDepth > 0) quoteProtectedLines.push({ from: offset, to: offset + line.length });
+            break;
+          }
+          if (depth === ancestors) {
+            const start = offset + prefixOffset, end = start + prefix[0].length;
+            add(start, end);
+            // 保留每一层的精确边界，退格降级不能使用合并后的原子装饰范围。
+            if (!protectedRanges.some((range) => start < range.to && end > range.from)) quotes.push({ from: start, to: end, blockFrom: from });
+          }
           prefixOffset += prefix[0].length;
         }
         firstLine = false; offset += line.length + 1;
@@ -872,7 +885,7 @@ function cleanMarkdownSyntaxUnchecked(text: string): { ranges: MarkdownSyntaxRan
     const last = merged.at(-1);
     if (last && range.from <= last.to) last.to = Math.max(last.to, range.to); else merged.push({ ...range });
   }
-  return { ranges: merged, links };
+  return { ranges: merged, links, quotes: quotes.filter((quote) => !quoteProtectedLines.some((range) => quote.from >= range.from && quote.from <= range.to)) };
 }
 
 /** 地址是单值，提交时整体校验；用尖括号和百分号编码防止输入逃逸为 Markdown 结构。 */

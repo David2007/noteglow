@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { EditorState, Transaction, StateEffect, StateField } from '@codemirror/state';
-import { history, undo, redo } from '@codemirror/commands';
+import { EditorState, EditorSelection, Transaction, StateEffect, StateField } from '@codemirror/state';
+import { history, undo, redo, isolateHistory } from '@codemirror/commands';
 import { cleanMarkdownSyntax, markdownLinkAddress } from '../src/markdown-colors.ts';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { keymap } from '@codemirror/view';
 import { cleanEditorExtension } from '../src/clean-editor.ts';
 
 function visible(text) { const {ranges}=cleanMarkdownSyntax(text);let output=text;for(const r of [...ranges].reverse())output=output.slice(0,r.from)+output.slice(r.to);return output; }
@@ -122,4 +124,110 @@ test('escape display decorations never rewrite source and Source mode reveals th
  let state=EditorState.create({doc:source,extensions:[extension]});assert.equal(state.field(field).decorations.size,2);assert.equal(state.doc.toString(),source);
  state=state.update({selection:{anchor:2}}).state;assert.equal(state.doc.toString(),source);assert.equal(state.field(field).decorations.size,2);
  live=false;state=state.update({}).state;assert.equal(state.field(field).decorations.size,0);assert.equal(state.doc.toString(),source);
+});
+
+test('multiline quotes retain exact per-level prefixes without treating code greater-than as nesting',()=>{
+ const source='> first\n> second\n>\n> > nested\n> > again';
+ const syntax=cleanMarkdownSyntax(source);
+ assert.equal(visible(source),'first\nsecond\n\nnested\nagain');
+ assert.deepEqual(syntax.quotes.map(r=>[source.slice(0,r.from).split('\n').length,source.slice(r.from,r.to)]),[[1,'> '],[2,'> '],[3,'>'],[4,'> '],[5,'> '],[4,'> '],[5,'> ']]);
+ for(const text of ['```\n> literal\n```','    > literal','---\nvalue: >\n---']) assert.deepEqual(cleanMarkdownSyntax(text).quotes,[]);
+ const code='> ```\n> > literal\n> ```';
+ assert.deepEqual(cleanMarkdownSyntax(code).quotes,[]);
+ assert.ok(visible(code).includes('> literal'));
+});
+
+// 直接调用已注册的键绑定；其余 Enter 事务由 Obsidian 原生 Markdown 命令负责。
+function quoteEditor(doc,cursor,options={}) {
+ let state=EditorState.create({doc,selection:options.selection??{anchor:cursor},extensions:[history(),EditorState.allowMultipleSelections.of(true),EditorState.readOnly.of(!!options.readOnly),cleanEditorExtension(()=>options.live!==false)]});
+ const view={get state(){return state;},composing:!!options.composing,dispatch(spec){state=spec.state??state.update(spec).state;}};
+ const backspace=state.facet(keymap).flat().find(binding=>binding.key==='Backspace').run;
+ return {view,backspace:()=>backspace(view)};
+}
+test('Backspace at quoted content start removes only one nested level and each step has its own Undo',()=>{
+ const original='> first\n> > second',cursor=original.indexOf('second'),editor=quoteEditor(original,cursor);
+ assert.equal(editor.backspace(),true);assert.equal(editor.view.state.doc.toString(),'> first\n> second');
+ assert.equal(editor.backspace(),true);assert.equal(editor.view.state.doc.toString(),'> first\n\nsecond');
+ assert.equal(editor.backspace(),false);
+ assert.equal(undo(editor.view),true);assert.equal(editor.view.state.doc.toString(),'> first\n> second');
+ assert.equal(undo(editor.view),true);assert.equal(editor.view.state.doc.toString(),original);assert.equal(editor.view.state.selection.main.head,cursor);
+ assert.equal(redo(editor.view),true);assert.equal(redo(editor.view),true);assert.equal(editor.view.state.doc.toString(),'> first\n\nsecond');
+});
+test('quote retreat preserves inline markup, whitespace, adjacent lines and actual code contents',()=>{
+ for(const [source,word,expected] of [
+  ['>  >  **重点**','重点','>  **重点**'],
+  ['> a\n> b\n> c','b','> a\n\nb\n> c'],
+  ['> > `x > 0`','x','> `x > 0`'],
+  ['> > ','', '> '],
+  ['> ','',''],
+ ]) {
+  const editor=quoteEditor(source,word?source.indexOf(word):source.length);
+  assert.equal(editor.backspace(),true,source);assert.equal(editor.view.state.doc.toString(),expected);
+  assert.equal(undo(editor.view),true);assert.equal(editor.view.state.doc.toString(),source);
+ }
+ for(const source of ['plain','> word','```\n> code\n```','    > code']) {
+  const editor=quoteEditor(source,source.indexOf('code')>=0?source.indexOf('code'):source.length);
+  assert.equal(editor.backspace(),false,source);assert.equal(editor.view.state.doc.toString(),source);
+ }
+});
+test('quote Backspace bypasses Source mode, readonly, composing, ranges and multiple cursors',()=>{
+ for(const options of [{live:false},{readOnly:true},{composing:true},{selection:{anchor:2,head:3}},{selection:EditorSelection.create([EditorSelection.cursor(2),EditorSelection.cursor(3)])}]) {
+  const editor=quoteEditor('> abc',2,options);
+  assert.equal(editor.backspace(),false);assert.equal(editor.view.state.doc.toString(),'> abc');
+ }
+});
+test('native Enter continuation and empty-quote exit transactions remain undoable with hidden markers',()=>{
+ const editor=quoteEditor('> first',7);
+ editor.view.dispatch({changes:{from:7,insert:'\n> '},selection:{anchor:10},annotations:[Transaction.userEvent.of('input'),isolateHistory.of('full')]});
+ assert.equal(editor.view.state.doc.toString(),'> first\n> ');
+ editor.view.dispatch({changes:{from:8,to:10},selection:{anchor:8},annotations:[Transaction.userEvent.of('input'),isolateHistory.of('full')]});
+ assert.equal(editor.view.state.doc.toString(),'> first\n');
+ assert.equal(undo(editor.view),true);assert.equal(editor.view.state.doc.toString(),'> first\n> ');
+ assert.equal(undo(editor.view),true);assert.equal(editor.view.state.doc.toString(),'> first');
+ assert.equal(redo(editor.view),true);assert.equal(redo(editor.view),true);assert.equal(editor.view.state.doc.toString(),'> first\n');
+});
+
+function textQuoteDepth(source,word) {
+ let found;
+ function visit(node,depth=0) {
+  const next=depth+(node.type==='blockquote'?1:0);
+  if(node.type==='text'&&node.value.includes(word))found=next;
+  for(const child of node.children??[])visit(child,next);
+ }
+ visit(fromMarkdown(source));return found;
+}
+test('multiline retreat changes parsed quote depth rather than creating lazy continuation',()=>{
+ for(const [source,word,depth] of [['> first\n> second','second',0],['> > first\n> > second\n> > third','second',1],['> outer\n> > first\n> > second','second',1]]) {
+  const editor=quoteEditor(source,source.indexOf(word));assert.equal(editor.backspace(),true);
+  const result=editor.view.state.doc.toString();assert.equal(textQuoteDepth(result,word),depth);
+  assert.equal(textQuoteDepth(result,'first'),textQuoteDepth(source,'first'));
+  if(source.includes('third'))assert.equal(textQuoteDepth(result,'third'),2);
+  assert.equal(undo(editor.view),true);assert.equal(editor.view.state.doc.toString(),source);
+ }
+});
+test('line-start and intermediate hidden-marker cursor positions also retreat exactly one level',()=>{
+ for(const cursor of [0,1,2,3,4]) {
+  const editor=quoteEditor('> > body',cursor);assert.equal(editor.backspace(),true);
+  assert.equal(editor.view.state.doc.toString(),'> body');assert.equal(textQuoteDepth(editor.view.state.doc.toString(),'body'),1);
+  assert.equal(undo(editor.view),true);assert.equal(editor.view.state.selection.main.head,cursor);
+ }
+});
+
+test('Backspace before a visible list marker is not consumed by a following quote',()=>{
+ for(const cursor of [0,1]) {
+  const editor=quoteEditor('- > quote',cursor);assert.equal(editor.backspace(),false);assert.equal(editor.view.state.doc.toString(),'- > quote');
+ }
+ const editor=quoteEditor('  > quote',0);assert.equal(editor.backspace(),true);assert.equal(editor.view.state.doc.toString(),'  quote');
+});
+
+test('quoted block code and implicit nested quote continuation stay with native Backspace',()=>{
+ for(const [source,word] of [
+  ['> ```js\n> const x = 1\n> ```','const'],
+  ['> ```js\n> const x = 1\n> ```','```js'],
+  ['>     const x = 1','const'],
+  ['> > first\n> second','second'],
+  ['> > > first\n> second','second']
+ ]) {
+  const editor=quoteEditor(source,source.indexOf(word));assert.equal(editor.backspace(),false,source);assert.equal(editor.view.state.doc.toString(),source);
+ }
 });
