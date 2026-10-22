@@ -13,6 +13,48 @@ function expand(source, command) {
  return { ...edit, text: source.slice(0, edit.from) + edit.insert + source.slice(edit.to) };
 }
 
+test('heading commands support all six levels and preserve surrounding paragraphs and CRLF', () => {
+ for (let level = 1; level <= 6; level++) {
+  const command = `/h${level}`, marker = '#'.repeat(level) + ' ';
+  for (const eol of ['\n', '\r\n']) {
+   const result = expand(`before${eol}   ${command}${eol}after`, command);
+   assert.equal(result.text, `before${eol}${eol}${marker}${eol}${eol}after`);
+   assert.equal(result.cursor, `before${eol}${eol}${marker}`.length);
+  }
+  const standalone = expand(command, command);
+  assert.equal(standalone.text, marker);
+  assert.equal(standalone.cursor, marker.length);
+ }
+ assert.equal(expand('before\n\n/h2\n\nafter', '/h2').text, 'before\n\n## \n\nafter');
+});
+
+test('heading lookalikes and protected Markdown remain literal input', () => {
+ for (const source of ['/h0', '/h7', '/h12', '/H1', '/h1 ', '/h1 title', 'hello /h1', '    /h1', '> /h1', '- /h1', '```\n/h1\n```', '~~~\n/h1', '<!--\n/h1\n-->', '<div>\n/h1\n</div>', '---\n/h1\n---', '$$\n/h1\n$$', '%%\n/h1\n%%', '- item\n  /h1']) {
+  const at = source.indexOf('/h1');
+  assert.equal(slashCommandEdit(source, at < 0 ? source.length : at + 3), null, source);
+ }
+});
+
+test('heading Enter and subsequent typing have independent undo and redo', () => {
+ let state = EditorState.create({ doc: '/h3', selection: { anchor: 3 }, extensions: [history()] });
+ const view = { composing: false, get state() { return state; }, dispatch(spec) { state = spec instanceof Transaction ? spec.state : state.update(spec).state; } };
+ assert.equal(expandSlashCommand(view), true);
+ assert.equal(state.doc.toString(), '### ');
+ assert.equal(state.selection.main.head, 4);
+ view.dispatch(state.replaceSelection('Title'));
+ assert.equal(state.doc.toString(), '### Title');
+ assert.equal(undo(view), true);
+ assert.equal(state.doc.toString(), '### ');
+ assert.equal(undo(view), true);
+ assert.equal(state.doc.toString(), '/h3');
+ assert.equal(state.selection.main.head, 3);
+ assert.equal(redo(view), true);
+ assert.equal(state.doc.toString(), '### ');
+ assert.equal(state.selection.main.head, 4);
+ assert.equal(redo(view), true);
+ assert.equal(state.doc.toString(), '### Title');
+});
+
 test('code and table are native blocks with useful cursor positions and isolated surrounding prose', () => {
  const code = expand('before\n/code\nafter', '/code');
  assert.equal(code.text, 'before\n\n```\n\n```\n\nafter');
