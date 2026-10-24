@@ -494,7 +494,7 @@ test('table colors share one record after the complete table and clear independe
  assert.equal(nativeTextDocumentShape(text),nativeTextDocumentShape(tableFixture));
  assert.equal(text.slice(0,tableFixture.length),tableFixture);
  const blocks=scanNativeText(text);assert.equal(blocks.length,1);assert.equal(blocks[0].kind,'table');assert.equal(blocks[0].status,'valid');assert.equal(blocks[0].to,tableFixture.length);
- assert.deepEqual(nativeTextColorRanges(text).map(range=>text.slice(range.from,range.to)),['场景','发送、接收和 ','for range',' 都会一直阻塞']);
+ assert.deepEqual(nativeTextColorRanges(text).map(range=>[range.property,text.slice(range.from,range.to)]),[['background','发送、接收和 '],['background','for range'],['background',' 都会一直阻塞'],['foreground','场景']]);
  text=applyNativeTextColor(text,from,to).text;
  assert.deepEqual(nativeTextColorRanges(text).map(range=>text.slice(range.from,range.to)),['场景']);
  assert.equal(resetNativeTextMetadata(text),tableFixture);
@@ -579,4 +579,17 @@ test('table bold and italic composition toggles independently around existing co
   assert.equal(resetNativeTextMetadata(restored),original);
   for(const value of [once,twice,restored]){assert.equal(scanNativeText(value)[0].status,'valid');assert.ok(value.includes('`for range`'));assert.equal(projectNativeMarkdown(resetNativeTextMetadata(value)).text,projectNativeMarkdown(original).text);}
  }
+});
+
+for(const [format,delimiter] of [['bold','**'],['italic','*']])for(const phrase of ['hello `code`','`code` hello'])test(`table visible selection toggles encompassing ${format} with code at ${phrase.startsWith('`')?'start':'end'}`,()=>{
+ const source=`| one | two |\n| --- | --- |\n| ${delimiter}${phrase}${delimiter} | unchanged |`;
+ const from=source.indexOf(phrase)+(phrase.startsWith('`')?1:0),to=source.indexOf(phrase)+phrase.length-(phrase.endsWith('`')?1:0);
+ const colored=applyNativeTextColor(source,from,to,'foreground',fg).text;
+ assert.equal(formatNativeText(colored,from,to,format,true).text,colored);
+ const changed=formatNativeText(colored,from,to,format);
+ assert.equal(resetNativeTextMetadata(changed.text),source.replace(delimiter+phrase+delimiter,phrase));
+ assert.equal(scanNativeText(changed.text)[0].status,'valid');
+ const projection=projectNativeMarkdown(resetNativeTextMetadata(changed.text)),ranges=nativeTextColorRanges(changed.text);
+ const start=changed.text.indexOf(phrase)+(phrase.startsWith('`')?1:0),end=changed.text.indexOf(phrase)+phrase.length-(phrase.endsWith('`')?1:0);
+ assert.ok(projection.offsets.filter(offset=>offset>=start&&offset<end).every(offset=>ranges.some(range=>range.from<=offset&&range.to>offset&&range.property==='foreground'&&range.color===fg)));
 });

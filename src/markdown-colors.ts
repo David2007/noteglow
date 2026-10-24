@@ -180,7 +180,7 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
     }
     spans.push({ from: cursor, to: end });
     // 已有整段格式可能跨过代码；完整选中时直接移除外层，不在未闭合的祖先标记内拼接。
-    const enclosing = tableCell && selected.some((leaf) => leaf.code) ? findExactFormat(paragraph, start, end, wanted) : null;
+    const enclosing = tableCell && selected.some((leaf) => leaf.code) ? findExactFormat(paragraph, start, end, wanted, selected) : null;
     if (enclosing?.children?.length) {
       if (applyOnly) return { text, from, to, ranges: [...legacyRanges] };
       const bounds = position(enclosing);
@@ -677,7 +677,7 @@ function findParagraph(ast: MdNode, from: number, to: number): MdNode | null {
   walkMd(ast, (node) => { if (node.type !== "paragraph" && node.type !== "heading") return; const bounds = position(node); if (bounds.from <= to && bounds.to >= from) { if (result) result = ast; else result = node; } });
   return result === ast ? null : result;
 }
-function findExactFormat(node: MdNode, from: number, to: number, wanted: string): MdNode | null {
+function findExactFormat(node: MdNode, from: number, to: number, wanted: string, tableLeaves: readonly Leaf[] = []): MdNode | null {
   let result: MdNode | null = null;
   walkMd(node, (candidate) => {
     if (candidate.type !== wanted || !candidate.children?.length) return;
@@ -687,7 +687,10 @@ function findExactFormat(node: MdNode, from: number, to: number, wanted: string)
     let first = candidate.children[0], last = candidate.children[candidate.children.length - 1];
     while (["strong", "emphasis", "delete"].includes(first.type) && first.children?.length) first = first.children[0];
     while (["strong", "emphasis", "delete"].includes(last.type) && last.children?.length) last = last.children[last.children.length - 1];
-    const innerFrom = position(first).from, innerTo = position(last).to;
+    // 表格可见选区不包含首尾代码的反引号；只调整完整选中判定，删除仍按直接子节点边界。
+    const firstCode = first.type === "inlineCode" ? tableLeaves.find((leaf) => leaf.from === position(first).from) : undefined;
+    const lastCode = last.type === "inlineCode" ? tableLeaves.find((leaf) => leaf.to === position(last).to) : undefined;
+    const innerFrom = firstCode?.units[0]?.from ?? position(first).from, innerTo = lastCode?.units.at(-1)?.to ?? position(last).to;
     if (from >= outer.from && from <= innerFrom && to >= innerTo && to <= outer.to) result = candidate;
   });
   return result;
