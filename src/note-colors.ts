@@ -394,7 +394,7 @@ class NoteColorController {
       current.editor.focus();
       // 调用公开保存 API，并直接读磁盘验证；编辑事务成功不代表文件已保存。
       await current.save();
-      const saved = await this.plugin.app.vault.adapter.read(selection.path);
+      const saved = await waitForNativeTableSave(edit.text, () => current.file?.path === selection.path ? current.editor.getValue() : null, () => current.save(), () => this.plugin.app.vault.adapter.read(selection.path));
       if (current.file?.path !== selection.path || current.editor.getValue() !== saved || (saved !== edit.text && !isNativeTableNormalization(edit.text, saved))) {
         throw new Error("正文在保存核验期间发生变化，请确认当前内容并保存；不会回滚或覆盖后续编辑。");
       }
@@ -701,4 +701,20 @@ function colorAt(ranges: readonly ColorRange[], position: number): { foreground?
   const result: { foreground?: string; background?: string } = {};
   for (const range of ranges) if (range.from <= position && range.to > position) result[range.property] = range.color;
   return result;
+}
+
+
+/** 宿主 save 在已有保存任务运行时只排队后立即返回；只为已核验的表格排版等待最终磁盘快照。 */
+export async function waitForNativeTableSave(expected: string, current: () => string | null, save: () => Promise<void>, read: () => Promise<string>, wait: () => Promise<void> = () => new Promise((resolve) => setTimeout(resolve, 50))): Promise<string> {
+  let saved = await read();
+  // 最多短暂等待 20 次（共 1 秒，不含保存 IO），不使用宿主私有 saving 状态，不直接写盘；后续真实编辑或切换笔记立即交回失败保护。
+  for (let attempt = 0; attempt < 20 && saved !== current(); attempt++) {
+    const text = current();
+    if (text === null || !isNativeTableNormalization(expected, text)) break;
+    await wait();
+    const latest = current();
+    if (latest === null || !isNativeTableNormalization(expected, latest)) break;
+    await save(); saved = await read();
+  }
+  return saved;
 }

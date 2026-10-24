@@ -6,7 +6,7 @@ import { Window } from 'happy-dom';
 
 // 保留生产注册和渲染流程，仅替换 Obsidian 桌面宿主提供的接口。
 const bundled = await build({
-  stdin: { contents: "export { registerNoteColors } from './src/note-colors.ts'; export { applyNativeCodeColor } from './src/native-code-colors.ts'; export { notices, TFile } from 'obsidian'; export { ViewPlugin } from '@codemirror/view'; export { applyNativeTextColor } from './src/native-text-colors.ts';", resolveDir: process.cwd() },
+  stdin: { contents: "export { registerNoteColors, waitForNativeTableSave } from './src/note-colors.ts'; export { applyNativeCodeColor } from './src/native-code-colors.ts'; export { notices, TFile } from 'obsidian'; export { ViewPlugin } from '@codemirror/view'; export { applyNativeTextColor } from './src/native-text-colors.ts';", resolveDir: process.cwd() },
   bundle: true, write: false, format: 'cjs', platform: 'node',
   plugins: [{ name: 'obsidian-host', setup(builder) {
     builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'test-host' }));
@@ -22,7 +22,7 @@ const bundled = await build({
 const module = new Module(import.meta.filename);
 module.require = createRequire(import.meta.url);
 module._compile(bundled.outputFiles[0].text, import.meta.filename);
-const { registerNoteColors, applyNativeCodeColor, applyNativeTextColor, notices, TFile, ViewPlugin } = module.exports;
+const { registerNoteColors, waitForNativeTableSave, applyNativeCodeColor, applyNativeTextColor, notices, TFile, ViewPlugin } = module.exports;
 
 async function setup(t, source, sectionInfo, legacy) {
   const window = new Window(), children = [], cleanups = [], timers = new Map();
@@ -131,4 +131,28 @@ test('active table decorations refresh and clear when only main-document metadat
  assert.deepEqual(marks(),[[1,7,'--codex-note-background:#cde6ff']]);
  main.replaceDocument(source);env.flush();assert.deepEqual(marks(),[]);
  assert.equal(active.textContent,'`target`');assert.equal(active.children.length,0);
+});
+
+
+test('table save readback waits for the host queued save and stops after exact disk confirmation',async()=>{
+ const before='| a | b |\n| --- | --- |\n| text | other |',expected=before.replace('text','**text**'),normalized=expected.replaceAll('| ','|   ');
+ let disk=before,saves=0,waits=0;
+ const saved=await waitForNativeTableSave(expected,()=>normalized,async()=>{if(++saves===2)disk=normalized;},async()=>disk,async()=>{waits++;});
+ assert.equal(saved,normalized);assert.equal(saves,2);assert.equal(waits,2);
+});
+
+test('table save wait rejects concurrent content changes and never retries ordinary paragraphs',async()=>{
+ const expected='| a | b |\n| --- | --- |\n| **text** | other |';
+ let current=expected,saves=0;
+ const saved=await waitForNativeTableSave(expected,()=>current,async()=>{saves++;},async()=>'',async()=>{current=expected+'\nnew user text';});
+ assert.equal(saved,'');assert.equal(saves,0);assert.equal(current,expected+'\nnew user text');
+ await waitForNativeTableSave('paragraph',()=> 'paragraph',async()=>{saves++;},async()=>'',async()=>assert.fail('non-table must not wait'));
+ assert.equal(saves,0);
+});
+
+test('table save wait is bounded and does not retry after view closes',async()=>{
+ const expected='| a | b |\n| --- | --- |';let saves=0,waits=0;
+ const saved=await waitForNativeTableSave(expected,()=>expected,async()=>{saves++;},async()=>'',async()=>{waits++;});
+ assert.equal(saved,'');assert.equal(saves,20);assert.equal(waits,20);
+ await waitForNativeTableSave(expected,()=>null,async()=>assert.fail('closed view must not save'),async()=>'',async()=>assert.fail('closed view must not wait'));
 });
