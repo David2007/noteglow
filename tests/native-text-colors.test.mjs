@@ -4,9 +4,9 @@ import {EditorState,EditorSelection,Transaction,StateField,StateEffect,ChangeSet
 import {history,undo,redo,isolateHistory,deleteCharBackward,deleteCharForward} from '@codemirror/commands';
 import {EditorView} from '@codemirror/view';
 import {Window} from 'happy-dom';
-import {applyNativeTextColor,formatNativeText,scanNativeText,nativeTextColorRanges,nativeTextColorTransactions,migrateOwnedTextToNative,resetNativeTextMetadata,encodeNativeTextMetadata,createNativeTextMetadataField,nativeTextMetadataChanges,nativeTextOwnedRecords,repairNativeTextMetadata} from '../src/native-text-colors.ts';
+import {applyNativeTextColor,formatNativeText,scanNativeText,nativeTextColorRanges,nativeTextColorTransactions,migrateOwnedTextToNative,resetNativeTextMetadata,encodeNativeTextMetadata,createNativeTextMetadataField,nativeTextMetadataChanges,nativeTextOwnedRecords,repairNativeTextMetadata,isNativeTableNormalization} from '../src/native-text-colors.ts';
 import {applyNativeCodeColor,nativeCodeColorTransactions,scanNativeCode,minimalTextChange} from '../src/native-code-colors.ts';
-import {applyMarkdownColor,nativeTextDocumentShape,restoreOwnedInline,projectNativeMarkdown} from '../src/markdown-colors.ts';
+import {applyMarkdownColor,nativeTextDocumentShape,restoreOwnedInline,projectNativeMarkdown,nativeTableCell,nativeTableEditorOffsets} from '../src/markdown-colors.ts';
 import {alignRenderedText} from '../src/color-ranges.ts';
 const bg='#fff88f',fg='#c0392b';
 const paint=(text,word,property='background',color=bg)=>{const from=text.indexOf(word);return applyNativeTextColor(text,from,from+word.length,property,color);};
@@ -592,4 +592,43 @@ for(const [format,delimiter] of [['bold','**'],['italic','*']])for(const phrase 
  const projection=projectNativeMarkdown(resetNativeTextMetadata(changed.text)),ranges=nativeTextColorRanges(changed.text);
  const start=changed.text.indexOf(phrase)+(phrase.startsWith('`')?1:0),end=changed.text.indexOf(phrase)+phrase.length-(phrase.endsWith('`')?1:0);
  assert.ok(projection.offsets.filter(offset=>offset>=start&&offset<end).every(offset=>ranges.some(range=>range.from<=offset&&range.to>offset&&range.property==='foreground'&&range.color===fg)));
+});
+
+
+test('host table alignment remaps existing colors without a user-event and undo restores exact bytes',()=>{
+ const source='before\n\n| one | two |\n| --- | --- |\n| alpha | `same` |\n\nafter';
+ const colored=paint(source,'same').text,block=scanNativeText(colored).find(block=>block.kind==='table');
+ const aligned=block.source.replaceAll('| ', '|   ').replaceAll(' |','   |').replaceAll('---','------');
+ const h=harness(colored);h.edit({from:block.from,to:block.to,insert:aligned},'');
+ assert.equal(scanNativeText(h.text).find(block=>block.kind==='table').status,'valid');
+ assert.deepEqual(nativeTextColorRanges(h.text).map(range=>h.text.slice(range.from,range.to)),['same']);
+ assert.equal(isNativeTableNormalization(colored,h.text),true);
+ assert.equal(undo(h.target),true);assert.equal(h.text,colored);assert.equal(redo(h.target),true);assert.equal(isNativeTableNormalization(colored,h.text),true);
+ for(const altered of [h.text.replace('after','later'),h.text.replace('alpha','other'),h.text.replace('`same`','**same**')])assert.equal(isNativeTableNormalization(colored,altered),false);
+});
+
+test('table normalization refuses changed cell syntax and altered colors even with identical visible text',()=>{
+ const source='| one | two |\n| --- | --- |\n| **same** | other |';
+ assert.equal(isNativeTableNormalization(source,source.replace('**same**','__same__')),false);
+ const painted=paint(source,'same').text;
+ assert.equal(isNativeTableNormalization(painted,paint(source,'same','foreground',fg).text),false);
+ assert.equal(isNativeTableNormalization('paragraph','paragraph'),false);
+ const block=scanNativeText(painted)[0],h=harness(painted);
+ h.edit({from:block.from,to:block.to,insert:block.source.replace('**same**','__same__')},'');
+ assert.equal(scanNativeText(h.text)[0].status,'stale');
+});
+
+test('table cell projection uses anchored row and column instead of matching duplicate text',()=>{
+ const source='before\n\n| same | same |\n| --- | --- |\n|  | `same` |\n\n| same | same |\n| --- | --- |';
+ const anchor=source.indexOf('| same'),cell=nativeTableCell(source,anchor,1,1);
+ assert.ok(cell);assert.equal(source.slice(cell.from,cell.to),'`same`');assert.equal(cell.projection.text,'same');
+ assert.equal(cell.projection.offsets[0],source.indexOf('`same`')+1);
+ assert.equal(nativeTableCell(source,anchor,1,0),null);assert.equal(nativeTableCell(source,0,1,1),null);assert.equal(nativeTableCell(source,anchor,5,1),null);assert.equal(nativeTableCell(source,anchor,-1,0),null);
+});
+
+test('active table editor maps only exact source and escaped-pipe transformations',()=>{
+ assert.deepEqual(nativeTableEditorOffsets('**a** `b`','**a** `b`',20),Array.from({length:9},(_,i)=>20+i));
+ assert.deepEqual(nativeTableEditorOffsets('a\\|b','a|b',10),[10,11,13]);
+ assert.deepEqual(nativeTableEditorOffsets('a\\\\|b','a\\\\|b',10),[10,11,12,13,14]);
+ assert.equal(nativeTableEditorOffsets('same','different',0),null);
 });

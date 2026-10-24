@@ -6,7 +6,7 @@ import { Window } from 'happy-dom';
 
 // 保留生产注册和渲染流程，仅替换 Obsidian 桌面宿主提供的接口。
 const bundled = await build({
-  stdin: { contents: "export { registerNoteColors } from './src/note-colors.ts'; export { applyNativeCodeColor } from './src/native-code-colors.ts'; export { notices, TFile } from 'obsidian';", resolveDir: process.cwd() },
+  stdin: { contents: "export { registerNoteColors } from './src/note-colors.ts'; export { applyNativeCodeColor } from './src/native-code-colors.ts'; export { notices, TFile } from 'obsidian'; export { ViewPlugin } from '@codemirror/view'; export { applyNativeTextColor } from './src/native-text-colors.ts';", resolveDir: process.cwd() },
   bundle: true, write: false, format: 'cjs', platform: 'node',
   plugins: [{ name: 'obsidian-host', setup(builder) {
     builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'test-host' }));
@@ -22,7 +22,7 @@ const bundled = await build({
 const module = new Module(import.meta.filename);
 module.require = createRequire(import.meta.url);
 module._compile(bundled.outputFiles[0].text, import.meta.filename);
-const { registerNoteColors, applyNativeCodeColor, notices, TFile } = module.exports;
+const { registerNoteColors, applyNativeCodeColor, applyNativeTextColor, notices, TFile, ViewPlugin } = module.exports;
 
 async function setup(t, source, sectionInfo, legacy) {
   const window = new Window(), children = [], cleanups = [], timers = new Map();
@@ -39,11 +39,20 @@ async function setup(t, source, sectionInfo, legacy) {
     register: callback => cleanups.push(callback), registerEvent() {}, registerDomEvent() {}, registerEditorExtension() {}, addCommand() {}, registerMarkdownPostProcessor: callback => { processor = callback; }
   };
   t.after(() => { cleanups.forEach(callback => callback()); for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } window.happyDOM.abort(); });
-  await registerNoteColors(plugin);
+  let editorPlugin;
+  const fromClass=ViewPlugin.fromClass;
+  ViewPlugin.fromClass=function(cls,spec){editorPlugin=cls;return fromClass.call(this,cls,spec);};
+  try { await registerNoteColors(plugin); } finally { ViewPlugin.fromClass=fromClass; }
   const el = window.document.createElement('div'); el.innerHTML = '<pre><code>hello\n</code></pre>'; window.document.body.append(el);
   const code = el.querySelector('code');
   await processor(el, { sourcePath: file.path, getSectionInfo: element => sectionInfo(element, code), addChild: child => { children.push(child); child.onload(); } });
-  return { el, code, refresh: () => children.forEach(child => child.refresh()), flush: () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(callback => callback()); } };
+  return { el, code, attachEditor(dom,text,anchor=0){
+    const state=value=>({doc:{toString:()=>value},field:()=>({file})});let instance;
+    const view={dom,state:state(text),posAtDOM:()=>anchor,dispatch(spec){instance.update({view,state:view.state,startState:view.state,docChanged:false,selectionSet:false,transactions:[{effects:Array.isArray(spec.effects)?spec.effects:[spec.effects],isUserEvent:()=>false}]});}};
+    instance=new editorPlugin(view);
+    instance.replaceDocument=value=>{const startState=view.state;view.state=state(value);instance.update({view,state:view.state,startState,docChanged:true,selectionSet:false,changes:{mapPos:position=>position},transactions:[]});};
+    cleanups.push(()=>instance.destroy());return instance;
+  }, process:async element=>processor(element,{sourcePath:file.path,getSectionInfo:()=>null,addChild:child=>{children.push(child);child.onload();}}), refresh: () => children.forEach(child => child.refresh()), flush: () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(callback => callback()); } };
 }
 const original = '```js\nhello\n```\n';
 const colored = applyNativeCodeColor(original, original.indexOf('hello'), original.indexOf('hello') + 5, 'background', '#fff88f').text;
@@ -80,4 +89,46 @@ for (const [name, source, info, expected] of [
   assert.equal(env.code.querySelector('span'), null);
   assert.equal(env.code.textContent, 'hello\n');
   env.flush(); assert.deepEqual(notices, []);
+});
+
+
+test('Live Preview table cell without section paints only the anchored cell and active editor uses decorations',async t=>{
+ const source='| same | same |\n| --- | --- |\n| same | `target` |',from=source.indexOf('target');
+ const text=applyNativeTextColor(source,from,from+6,'background','#fff88f').text;
+ const env=await setup(t,text,()=>null);
+ env.el.innerHTML='<div class="cm-table-widget"><table class="table-editor"><thead><tr><th><div>same</div></th><th><div>same</div></th></tr></thead><tbody><tr><td><div>same</div></td><td><div class="table-cell-wrapper"><code>target</code></div></td></tr></tbody></table></div>';
+ env.attachEditor(env.el,text);
+ const cell=env.el.querySelector('.table-cell-wrapper');await env.process(cell);
+ assert.equal(cell.dataset.codexNoteColorStatus,'applied');assert.equal(cell.querySelector('span').textContent,'target');
+ assert.equal(cell.querySelector('span').style.getPropertyValue('--codex-note-background'),'#fff88f');
+ const active=env.el.ownerDocument.createElement('div');cell.parentElement.append(active);active.textContent='`target`';
+ const editor=env.attachEditor(active,'`target`');
+ const ranges=[];editor.decorations.between(0,8,(from,to,decoration)=>ranges.push([from,to,decoration.spec.attributes.style]));
+ assert.deepEqual(ranges,[[1,7,'--codex-note-background:#fff88f']]);
+ assert.equal(active.textContent,'`target`');assert.equal(active.children.length,0);
+});
+
+test('Live Preview table binding rejects wrong anchor and mismatched cell DOM',async t=>{
+ const source='before\n\n| one | two |\n| --- | --- |\n| same | target |',from=source.indexOf('target'),text=applyNativeTextColor(source,from,from+6,'background','#fff88f').text;
+ const env=await setup(t,text,()=>null);
+ env.el.innerHTML='<div class="cm-table-widget"><table class="table-editor"><tr><th>one</th><th>two</th></tr><tr><td>same</td><td><div class="table-cell-wrapper">target</div></td></tr></table></div>';
+ const instance=env.attachEditor(env.el,text,0),cell=env.el.querySelector('.table-cell-wrapper');await env.process(cell);
+ assert.equal(cell.querySelector('span'),null);assert.equal(cell.dataset.codexNoteColorStatus,'no-source-section');
+ instance.destroy();env.attachEditor(env.el,text,source.indexOf('| one'));cell.textContent='different';env.refresh();
+ assert.ok(cell.dataset.codexNoteColorStatus.startsWith('projection-mismatch'));assert.equal(cell.querySelector('span'),null);
+});
+
+
+test('active table decorations refresh and clear when only main-document metadata changes',async t=>{
+ const source='| one | two |\n| --- | --- |\n| same | `target` |',from=source.indexOf('target');
+ const initial=applyNativeTextColor(source,from,from+6,'background','#fff88f').text;
+ const env=await setup(t,initial,()=>null);
+ env.el.innerHTML='<div class="cm-table-widget"><table class="table-editor"><tr><th>one</th><th>two</th></tr><tr><td>same</td><td><div class="table-cell-wrapper"></div></td></tr></table></div>';
+ const main=env.attachEditor(env.el,initial),active=env.el.querySelector('.table-cell-wrapper');active.textContent='`target`';
+ const cell=env.attachEditor(active,'`target`'),marks=()=>{const ranges=[];cell.decorations.between(0,8,(from,to,decoration)=>ranges.push([from,to,decoration.spec.attributes.style]));return ranges;};
+ env.flush();assert.deepEqual(marks(),[[1,7,'--codex-note-background:#fff88f']]);
+ main.replaceDocument(applyNativeTextColor(initial,from,from+6,'background','#cde6ff').text);env.flush();
+ assert.deepEqual(marks(),[[1,7,'--codex-note-background:#cde6ff']]);
+ main.replaceDocument(source);env.flush();assert.deepEqual(marks(),[]);
+ assert.equal(active.textContent,'`target`');assert.equal(active.children.length,0);
 });

@@ -1,12 +1,12 @@
 import { editorInfoField, editorLivePreviewField, MarkdownRenderChild, MarkdownView, Notice, normalizePath, Plugin, TFile, type Editor, type MarkdownPostProcessorContext } from "obsidian";
 import { StateEffect } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
-import { alignRenderedText, mapColorRanges, normalizeColor, parseLastColors, parseNoteColors, projectMarkdown, relocateColorRanges, type ColoredNote, type ColorProperty, type ColorRange, type NoteColorsData } from "./color-ranges";
-import { projectNativeMarkdown, mapRenderedCodeAtPosition, mapRenderedCodeSelection, decodeOwnedCodeBlocks, type PortableColorEdit } from "./markdown-colors";
+import { alignRenderedText, mergeRanges, mapColorRanges, normalizeColor, parseLastColors, parseNoteColors, projectMarkdown, relocateColorRanges, type ColoredNote, type ColorProperty, type ColorRange, type NoteColorsData } from "./color-ranges";
+import { projectNativeMarkdown, nativeTableCell, nativeTableEditorOffsets, mapRenderedCodeAtPosition, mapRenderedCodeSelection, decodeOwnedCodeBlocks, type PortableColorEdit } from "./markdown-colors";
 import { readCodeDomSelection } from "./rendered-code-selection";
 import { createColorPicker } from "./color-picker";
 import { applyNativeCodeColor, backupNativeCodeMigration, createNativeMetadataField, mapMigratedCodePosition, migrateOwnedCodeToNative, minimalTextChange, nativeCodeColorTransactions, paintNativeCodeElement, scanNativeCode } from "./native-code-colors";
-import { applyNativeTextColor, formatNativeText, migrateOwnedTextToNative, nativeTextColorRanges, nativeTextColorTransactions, createNativeTextMetadataField, resetNativeTextMetadata } from "./native-text-colors";
+import { applyNativeTextColor, formatNativeText, isNativeTableNormalization, migrateOwnedTextToNative, nativeTextColorRanges, nativeTextColorTransactions, createNativeTextMetadataField, resetNativeTextMetadata } from "./native-text-colors";
 
 const refreshColors = StateEffect.define<void>();
 interface WriteChannel { queue: Promise<void> }
@@ -96,13 +96,13 @@ class NoteColorController {
     plugin.registerEditorExtension(createNativeMetadataField((state) => state.field(editorLivePreviewField, false) === true));
     plugin.registerEditorExtension(ViewPlugin.fromClass(class {
       decorations: DecorationSet;
-      constructor(readonly view: EditorView) { owner.editors.add(view); this.decorations = owner.decorations(view); }
+      constructor(readonly view: EditorView) { owner.editors.add(view); this.decorations = owner.decorations(view); owner.scheduleRefresh(); }
       update(update: ViewUpdate): void {
         if (update.docChanged) { owner.hideCodeToolbar(); owner.closeColorPicker(); owner.scheduleRefresh(); }
         const path = editorPath(update.view);
         const previousPath = update.startState.field(editorInfoField, false)?.file?.path;
         if (update.docChanged && path && path === previousPath) owner.documentChanged(path, update.startState.doc.toString(), update.state.doc.toString(), (position, association) => update.changes.mapPos(position, association), update.transactions.some((transaction) => transaction.isUserEvent("undo") || transaction.isUserEvent("redo")));
-        if (update.docChanged || path !== previousPath || update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(refreshColors)))) this.decorations = owner.decorations(update.view);
+        if (update.docChanged || update.selectionSet || path !== previousPath || update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(refreshColors)))) this.decorations = owner.decorations(update.view);
       }
       destroy(): void { owner.editors.delete(this.view); }
     }, { decorations: (instance) => instance.decorations }));
@@ -395,7 +395,7 @@ class NoteColorController {
       // 调用公开保存 API，并直接读磁盘验证；编辑事务成功不代表文件已保存。
       await current.save();
       const saved = await this.plugin.app.vault.adapter.read(selection.path);
-      if (saved !== edit.text || current.file?.path !== selection.path || current.editor.getValue() !== edit.text) {
+      if (current.file?.path !== selection.path || current.editor.getValue() !== saved || (saved !== edit.text && !isNativeTableNormalization(edit.text, saved))) {
         throw new Error("正文在保存核验期间发生变化，请确认当前内容并保存；不会回滚或覆盖后续编辑。");
       }
       if (property) {
@@ -433,8 +433,29 @@ class NoteColorController {
     this.lastColorStyle.textContent = `:root{--codex-notes-last-foreground:${colors.foreground};--codex-notes-last-background:${colors.background}}button:has(.codex-notes-color-dropdown){width:16px!important;min-width:16px!important;padding-left:0!important;padding-right:0!important}button:has(.codex-notes-color-dropdown) svg{width:12px;height:16px}`;
   }
 
+  /** 只用宿主公开 CM DOM 锚点及真实行列定位；重复单元格文字不会造成串色。 */
+  private tableCellBinding(el: HTMLElement, path?: string): { text: string; cell: NonNullable<ReturnType<typeof nativeTableCell>> } | null {
+    const cellEl = el.closest<HTMLTableCellElement>("td,th"), table = cellEl?.closest<HTMLTableElement>("table.table-editor"), widget = table?.closest<HTMLElement>(".cm-table-widget");
+    if (!cellEl || !table || !widget || !cellEl.parentElement) return null;
+    const editors = Array.from(this.editors).filter((editor) => editor.dom.contains(widget) && !editor.dom.closest("td,th") && (!path || editorPath(editor) === path));
+    if (editors.length !== 1) return null;
+    try {
+      const editor = editors[0], text = editor.state.doc.toString(), row = Array.from(table.rows).indexOf(cellEl.parentElement as HTMLTableRowElement);
+      const anchor = editor.posAtDOM(widget), cell = nativeTableCell(text, anchor, row, cellEl.cellIndex);
+      return cell ? { text, cell } : null;
+    } catch { return null; }
+  }
+
   decorations(view: EditorView): DecorationSet {
     if (!this.enabled || this.disposed) return Decoration.none;
+    if (view.dom.closest(".cm-table-widget td,.cm-table-widget th")) {
+      const binding = this.tableCellBinding(view.dom);
+      if (!binding) return Decoration.none;
+      const { text, cell } = binding, offsets = nativeTableEditorOffsets(text.slice(cell.from, cell.to), view.state.doc.toString(), cell.from);
+      if (!offsets) return Decoration.none;
+      const colors = nativeTextColorRanges(text), ranges = mergeRanges(offsets.flatMap((offset, index) => colors.filter((range) => range.from <= offset && range.to > offset).map((range) => ({ ...range, from: index, to: index + 1 }))));
+      return Decoration.set(ranges.map((range) => Decoration.mark({ class: colorClass(range.property), attributes: { style: colorStyle(range.property, range.color) } }).range(range.from, range.to)), true);
+    }
     const path = editorPath(view);
     const note = path ? this.data.notes[path] : undefined;
     const text = view.state.doc.toString();
@@ -570,14 +591,20 @@ class NoteColorController {
     const note = nativeRanges.length ? { text, ranges: [...(legacy?.text === text ? legacy.ranges : []), ...nativeRanges] } : legacy;
     const section = context.getSectionInfo(el);
     if (!note) { el.dataset.codexNoteColorStatus = "no-colors"; return; }
-    if (!section) { el.dataset.codexNoteColorStatus = "no-source-section"; return; }
-    const lines = note.text.split("\n");
-    if (section.lineStart < 0 || section.lineEnd >= lines.length || section.lineEnd < section.lineStart) { el.dataset.codexNoteColorStatus = "invalid-section-bounds"; return; }
-    const start = lines.slice(0, section.lineStart).reduce((sum, line) => sum + line.length + 1, 0);
-    const end = Math.min(note.text.length, lines.slice(0, section.lineEnd + 1).reduce((sum, line) => sum + line.length + 1, 0));
-    const source = note.text.slice(start, end);
-    // 通常是全文；只含 section 的渲染器也必须与快照精确一致。
-    if (section.text !== note.text && section.text !== source && section.text !== source.replace(/\n$/, "")) { el.dataset.codexNoteColorStatus = "source-snapshot-mismatch"; return; }
+    let start: number, end: number, source: string, tableProjection: ReturnType<typeof projectNativeMarkdown> | undefined;
+    if (section) {
+      const lines = note.text.split("\n");
+      if (section.lineStart < 0 || section.lineEnd >= lines.length || section.lineEnd < section.lineStart) { el.dataset.codexNoteColorStatus = "invalid-section-bounds"; return; }
+      start = lines.slice(0, section.lineStart).reduce((sum, line) => sum + line.length + 1, 0);
+      end = Math.min(note.text.length, lines.slice(0, section.lineEnd + 1).reduce((sum, line) => sum + line.length + 1, 0));
+      source = note.text.slice(start, end);
+      if (section.text !== note.text && section.text !== source && section.text !== source.replace(/\n$/, "")) { el.dataset.codexNoteColorStatus = "source-snapshot-mismatch"; return; }
+    } else {
+      // Live Preview 原生表格按单元格 postprocess，宿主明确不给 section；用主编辑器锚点补齐身份。
+      const binding = this.tableCellBinding(el, context.sourcePath);
+      if (!binding || binding.text !== note.text) { el.dataset.codexNoteColorStatus = "no-source-section"; return; }
+      start = binding.cell.from; end = binding.cell.to; source = note.text.slice(start, end); tableProjection = binding.cell.projection;
+    }
     const ranges = note.ranges.filter((range) => range.from < end && range.to > start);
     if (!ranges.length) { el.dataset.codexNoteColorStatus = "no-section-colors"; return; }
     const nodes: Text[] = [];
@@ -587,7 +614,7 @@ class NoteColorController {
       nodes.push(node);
     }
     const rendered = nodes.map((node) => node.data).join("");
-    const projection = nativeRanges.length ? projectNativeMarkdown(source, start) : projectMarkdown(source, start);
+    const projection = tableProjection ?? (nativeRanges.length ? projectNativeMarkdown(source, start) : projectMarkdown(source, start));
     const alignment = alignRenderedText(projection, rendered);
     if (!alignment) { el.dataset.codexNoteColorStatus = `projection-mismatch:${projection.text.length}/${rendered.length}`; return; }
     el.dataset.codexNoteColorStatus = "applied";

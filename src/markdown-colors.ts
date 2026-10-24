@@ -957,3 +957,34 @@ export function markdownLinkAddress(value: string): string | null {
   if (!address || address.length > 8192 || /[\u0000-\u001f\u007f<>]/.test(value)) return null;
   return "<" + address.replace(/&/g, "&amp;").replace(/\\/g, "%5C").replace(/ /g, "%20") + ">";
 }
+
+/** 宿主表格 widget 的 CM 锚点与 DOM 行列共同定位；不按重复文字猜测单元格身份。 */
+export function nativeTableCell(text: string, anchor: number, row: number, column: number): { from: number; to: number; projection: { text: string; offsets: number[] } } | null {
+  if (![anchor, row, column].every(Number.isInteger) || row < 0 || column < 0) return null;
+  const tables = (parseMarkdown(text).children ?? []).filter((node) => node.type === "table" && position(node).from <= anchor && position(node).to >= anchor);
+  if (tables.length !== 1) return null;
+  const cell = tables[0].children?.[row]?.children?.[column];
+  if (!cell?.children?.length) return null;
+  const from = position(cell.children[0]).from, to = position(cell.children.at(-1)!).to;
+  const units = buildModel(text, []).leaves.filter((leaf) => leaf.from >= from && leaf.to <= to).flatMap((leaf) => leaf.units);
+  return { from, to, projection: { text: units.map((unit) => unit.value).join(""), offsets: units.map((unit) => unit.from) } };
+}
+
+/** 活动单元格的宿主编辑器会解开管道转义；仅在精确源码变换一致时给出本地位置映射。 */
+export function nativeTableEditorOffsets(source: string, local: string, base: number): number[] | null {
+  const offsets: number[] = [], pieces: string[] = [];
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === "\\") {
+      let end = i; while (source[end] === "\\") end++;
+      const escapedPipe = source[end] === "|" && (end - i) % 2 === 1;
+      // 整段反斜杠一次消费；偶数个必须原样保留，不能下一轮把尾段误判为奇数转义。
+      const slashEnd = escapedPipe ? end - 1 : end;
+      for (let at = i; at < slashEnd; at++) { pieces.push(source[at]); offsets.push(base + at); }
+      if (escapedPipe) { pieces.push("|"); offsets.push(base + end - 1); i = end; }
+      else i = end - 1;
+      continue;
+    }
+    pieces.push(source[i]); offsets.push(base + i);
+  }
+  return pieces.join("") === local ? offsets : null;
+}

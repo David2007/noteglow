@@ -137,10 +137,18 @@ export function formatNativeText(text: string, from: number, to: number, format:
   return { text: text.slice(0, block.from) + replacement + text.slice(block.metadataTo), from: block.from + result.from, to: block.from + result.to };
 }
 /** 仅原块结构保持完整时同步快照。分裂、合并、未知结构不猜测迁移，保留旧记录供重置。 */
-export function nativeTextMetadataChanges(before: string, after: string, changes: ChangeSet): Array<{ from: number; to: number; insert: string }> {
+export function nativeTextMetadataChanges(before: string, after: string, changes: ChangeSet, normalizationOnly = false): Array<{ from: number; to: number; insert: string }> {
   const next = scanNativeText(after), records = nativeTextOwnedRecords(after), edits: Array<{ from: number; to: number; insert: string }> = [];
   for (const old of scanNativeText(before)) {
     if (old.status !== "valid") continue;
+    // Obsidian 聚焦单元格时可能整表重排 padding，且事务没有 input 标记；仅同一棵表格树可沿文字单元重映射。
+    const normalized = old.kind === "table" ? next.find((item) => item.kind === "table" && item.from === changes.mapPos(old.from, -1) && item.to === changes.mapPos(old.to, 1) && item.supported) : undefined;
+    if (normalized && normalized.source !== old.source && normalized.status === "stale" && after.slice(normalized.to, normalized.metadataTo) === before.slice(old.to, old.metadataTo) && nativeTextDocumentShape(normalized.source) === nativeTextDocumentShape(old.source) && old.cells.length === normalized.cells.length && old.cells.every((cell, index) => before.slice(cell.from, cell.to) === after.slice(normalized.cells[index].from, normalized.cells[index].to)) && old.units.length === normalized.units.length) {
+      const ranges = old.units.flatMap((unit, index) => old.ranges.filter((range) => range.from <= unit.from - old.from && range.to >= unit.to - old.from).map((range) => ({ ...range, from: normalized.units[index].from - normalized.from, to: normalized.units[index].to - normalized.from })));
+      edits.push({ from: normalized.commentFrom, to: normalized.metadataTo, insert: encodeNativeTextMetadata(normalized.source, mergeRanges(ranges)) });
+      continue;
+    }
+    if (normalizationOnly) continue;
     // 原始关联已由事务证明，不做内容搜索；只在原块和原记录字节都完整时把插入的新块移到记录后。
     const original = next.find((item) => item.from === changes.mapPos(old.from, -1) && item.source === old.source && item.supported);
     const record = records.find((item) => item.commentFrom === changes.mapPos(old.commentFrom, 1) && item.raw === before.slice(old.commentFrom, old.metadataTo));
@@ -162,9 +170,10 @@ export function nativeTextMetadataChanges(before: string, after: string, changes
   return edits.sort((a, b) => a.from - b.from);
 }
 export const nativeTextColorTransactions = EditorState.transactionFilter.of((transaction) => {
-  if (!transaction.docChanged || !(transaction.isUserEvent("input") || transaction.isUserEvent("delete") || transaction.isUserEvent("indent"))) return transaction;
+  if (!transaction.docChanged) return transaction;
+  const normalizationOnly = !(transaction.isUserEvent("input") || transaction.isUserEvent("delete") || transaction.isUserEvent("indent"));
   const before = transaction.startState.doc.toString(); if (!before.includes(MARKER)) return transaction;
-  const changes = nativeTextMetadataChanges(before, transaction.newDoc.toString(), transaction.changes);
+  const changes = nativeTextMetadataChanges(before, transaction.newDoc.toString(), transaction.changes, normalizationOnly);
   return changes.length ? [transaction, { changes, sequential: true }] : transaction;
 });
 export function createNativeTextMetadataField(live: (state: EditorState) => boolean): StateField<DecorationSet> {
@@ -196,4 +205,19 @@ export function migrateOwnedTextToNative(text: string): { text: string; count: n
   // 从后向前插入记录，只有前方块的记录会平移后面的光标；逐块按精确快照匹配位置。
   const blocks = scanNativeText(output).filter((block) => block.status === "valid");
   return { text: output, count: restored.count, map: (position) => { let at = restored.map(position); for (const block of blocks) if (block.to < at) at += block.metadataTo - block.to; return at; } };
+}
+
+/** 保存核验只容忍表格排版空白变化；表外字节、单元格语法、可见文字及每个文字单元颜色必须完全一致。 */
+export function isNativeTableNormalization(before: string, after: string): boolean {
+  const signature = (text: string): string | null => {
+    const tables = scanNativeText(text).filter((block) => block.kind === "table");
+    if (!tables.length || tables.some((block) => !block.supported || !["none", "valid"].includes(block.status))) return null;
+    const parts: unknown[] = []; let cursor = 0;
+    for (const block of tables) {
+      parts.push(text.slice(cursor, block.from), nativeTextDocumentShape(block.source), block.cells.map((cell) => text.slice(cell.from, cell.to)), block.units.map((unit) => block.ranges.filter((range) => range.from <= unit.from - block.from && range.to >= unit.to - block.from).map(({ property, color }) => [property, color])));
+      cursor = block.metadataTo;
+    }
+    parts.push(text.slice(cursor)); return JSON.stringify(parts);
+  };
+  const expected = signature(before); return expected !== null && expected === signature(after);
 }
