@@ -485,3 +485,98 @@ test('quote insertion preserves independent native code metadata with either tra
   assert.equal(undo(h.target),true);assert.equal(h.text,source);
  }
 });
+
+const tableFixture='| 场景 | 结果 |\n| --- | --- |\n| nil | 发送、接收和 `for range` 都会一直阻塞 |\n| other | unchanged |';
+test('table colors share one record after the complete table and clear independently',()=>{
+ let text=paint(tableFixture,'场景','foreground',fg).text;
+ const from=text.indexOf('发送'),to=text.indexOf('阻塞')+2;
+ text=applyNativeTextColor(text,from,to,'background',bg).text;
+ assert.equal(nativeTextDocumentShape(text),nativeTextDocumentShape(tableFixture));
+ assert.equal(text.slice(0,tableFixture.length),tableFixture);
+ const blocks=scanNativeText(text);assert.equal(blocks.length,1);assert.equal(blocks[0].kind,'table');assert.equal(blocks[0].status,'valid');assert.equal(blocks[0].to,tableFixture.length);
+ assert.deepEqual(nativeTextColorRanges(text).map(range=>text.slice(range.from,range.to)),['场景','发送、接收和 ','for range',' 都会一直阻塞']);
+ text=applyNativeTextColor(text,from,to).text;
+ assert.deepEqual(nativeTextColorRanges(text).map(range=>text.slice(range.from,range.to)),['场景']);
+ assert.equal(resetNativeTextMetadata(text),tableFixture);
+});
+
+for(const format of ['bold','italic'])test(`table mixed ${format} preserves inline code and both colors through toggle and repeat`,()=>{
+ const from=tableFixture.indexOf('发送'),to=tableFixture.indexOf('阻塞')+2;
+ let text=applyNativeTextColor(tableFixture,from,to,'background',bg).text;
+ text=applyNativeTextColor(text,from,to,'foreground',fg).text;
+ const result=formatNativeText(text,from,to,format),delimiter=format==='bold'?'**':'*';
+ assert.ok(result.text.includes(`${delimiter}发送、接收和${delimiter} \`for range\` ${delimiter}都会一直阻塞${delimiter}`));
+ assert.equal(projectNativeMarkdown(resetNativeTextMetadata(result.text)).text,projectNativeMarkdown(tableFixture).text);
+ assert.equal(scanNativeText(result.text)[0].status,'valid');
+ const projectedColors=value=>{const projection=projectNativeMarkdown(resetNativeTextMetadata(value)),ranges=nativeTextColorRanges(value);return projection.offsets.map(offset=>ranges.filter(range=>range.from<=offset&&range.to>offset).map(range=>[range.property,range.color]));};
+ assert.deepEqual(projectedColors(result.text),projectedColors(text));
+ const repeat=formatNativeText(result.text,result.from,result.to,format,true);assert.equal(repeat.text,result.text);
+ const reverted=formatNativeText(result.text,result.from,result.to,format);assert.equal(reverted.text,text);
+});
+
+test('table code toggle preserves escaped pipes, entities and emoji without making another column',()=>{
+ const source='| one | two |\n| --- | --- |\n| a\\|b &amp; 😀 | next |';
+ const from=source.indexOf('a\\|b'),to=source.indexOf('😀')+2;
+ const painted=applyNativeTextColor(source,from,to,'foreground',fg);
+ const code=formatNativeText(painted.text,from,to,'code');
+ assert.ok(code.text.includes('`a\\|b & 😀`'));assert.equal(scanNativeText(code.text)[0].cells.length,4);
+ const restored=formatNativeText(code.text,code.from,code.to,'code');
+ assert.equal(projectNativeMarkdown(resetNativeTextMetadata(restored.text)).text,projectNativeMarkdown(source).text);
+ assert.equal(scanNativeText(restored.text)[0].status,'valid');
+ assert.throws(()=>applyNativeTextColor(code.text,code.text.indexOf('\\|')+1,code.text.indexOf('\\|')+2,'background',bg),/实体/);
+});
+
+test('table selection rejects cell, row, separator and empty-cell boundaries for all actions',()=>{
+ const from=tableFixture.indexOf('nil'),to=tableFixture.indexOf('发送')+2;
+ const ranges=[[from,to],[from,tableFixture.indexOf('other')+5],[tableFixture.indexOf('---'),tableFixture.indexOf('---')+3],[0,1]];
+ for(const [start,end] of ranges){
+  assert.throws(()=>applyNativeTextColor(tableFixture,start,end,'background',bg),/单元格/);
+  for(const format of ['bold','italic','code'])assert.throws(()=>formatNativeText(tableFixture,start,end,format),/单元格/);
+ }
+ const empty='| a | b |\n| --- | --- |\n|  | c |',at=empty.lastIndexOf('|  |')+1;
+ assert.throws(()=>applyNativeTextColor(empty,at,at+1,'background',bg),/单元格/);
+ // 普通段落保留原有契约，不因表格增强静默跳过代码。
+ assert.throws(()=>formatNativeText('text `code` tail',0,16,'bold'),/行内代码/);
+});
+
+test('ordinary table typing updates ranges in one transaction and undo restores exact metadata',()=>{
+ const colored=paint(tableFixture,'阻塞').text,h=harness(colored),at=colored.indexOf('阻塞');
+ h.edit({from:at,to:at,insert:'始终'});
+ assert.equal(scanNativeText(h.text)[0].status,'valid');assert.deepEqual(nativeTextColorRanges(h.text).map(range=>h.text.slice(range.from,range.to)),['阻塞']);
+ assert.equal(undo(h.target),true);assert.equal(h.text,colored);assert.equal(redo(h.target),true);assert.equal(scanNativeText(h.text)[0].status,'valid');
+});
+
+test('table reading projection excludes pipes, alignment markers, links and metadata',()=>{
+ const source='| Label | Value |\n| :--- | ---: |\n| [same](https://example.test) | `same` |';
+ const from=source.lastIndexOf('same'),text=applyNativeTextColor(source,from,from+4,'background',bg).text;
+ const projection=projectNativeMarkdown(source),alignment=alignRenderedText(projection,'\nLabel\nValue\nsame\nsame\n');
+ assert.ok(alignment);const rendered='\nLabel\nValue\nsame\nsame\n',at=rendered.lastIndexOf('same');
+ assert.deepEqual(alignment.slice(at,at+4),[from,from+1,from+2,from+3]);assert.equal(nativeTextColorRanges(text)[0].from,from);
+});
+
+for(const [format,delimiter] of [['bold','**'],['italic','*']])test(`table toggles existing encompassing ${format} without duplicating delimiters`,()=>{
+ const phrase='发送、接收和 `for range` 都会一直阻塞',source=`| 场景 | 结果 |\n| --- | --- |\n| nil | ${delimiter}${phrase}${delimiter} |`;
+ const from=source.indexOf('发送'),to=source.indexOf('阻塞')+2;
+ const colored=applyNativeTextColor(source,from,to,'background',bg).text;
+ assert.equal(formatNativeText(colored,from,to,format,true).text,colored);
+ const changed=formatNativeText(colored,from,to,format);
+ assert.equal(resetNativeTextMetadata(changed.text),source.replace(delimiter+phrase+delimiter,phrase));
+ assert.equal(scanNativeText(changed.text)[0].status,'valid');
+ const projection=projectNativeMarkdown(resetNativeTextMetadata(changed.text)),ranges=nativeTextColorRanges(changed.text);
+ const selected=projection.offsets.filter(offset=>offset>=changed.text.indexOf('发送')&&offset<changed.text.indexOf('阻塞')+2);
+ assert.ok(selected.every(offset=>ranges.some(range=>range.from<=offset&&range.to>offset&&range.property==='background'&&range.color===bg)));
+});
+
+test('table bold and italic composition toggles independently around existing code',()=>{
+ const phrase='发送、接收和 `for range` 都会一直阻塞';
+ for(const initial of [phrase,`**${phrase}**`,`*${phrase}*`]){
+  let text=`| 场景 | 结果 |\n| --- | --- |\n| nil | ${initial} |`;
+  const original=text,from=text.indexOf('发送'),to=text.indexOf('阻塞')+2;
+  text=applyNativeTextColor(text,from,to,'background',bg).text;
+  const first=initial.startsWith('**')?'italic':'bold',second=first==='bold'?'italic':'bold';
+  const apply=(value,format)=>formatNativeText(value,value.indexOf('发送'),value.indexOf('阻塞')+2,format).text;
+  const once=apply(text,first),twice=initial===phrase?apply(once,second):once,restored=apply(initial===phrase?apply(twice,second):twice,first);
+  assert.equal(resetNativeTextMetadata(restored),original);
+  for(const value of [once,twice,restored]){assert.equal(scanNativeText(value)[0].status,'valid');assert.ok(value.includes('`for range`'));assert.equal(projectNativeMarkdown(resetNativeTextMetadata(value)).text,projectNativeMarkdown(original).text);}
+ }
+});

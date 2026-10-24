@@ -7,7 +7,7 @@ const MARKER = "<!-- noteglow-text-colors:", PREFIX = MARKER + "1 ";
 const MAX_TEXT = 1_000_000, MAX_BLOCK = 200_000;
 export interface NativeTextBlock {
   from: number; to: number; line: number; kind: string; structure: string; supported: boolean;
-  units: Array<{ from: number; to: number }>; source: string; eol: string;
+  cells: Array<{ from: number; to: number }>; units: Array<{ from: number; to: number }>; source: string; eol: string;
   metadataFrom: number; metadataTo: number; commentFrom: number;
   status: "none" | "valid" | "stale" | "invalid"; ranges: ColorRange[];
 }
@@ -103,8 +103,9 @@ export function nativeTextColorRanges(text: string): ColorRange[] {
 function selectedBlock(text: string, from: number, to: number): NativeTextBlock {
   if (text.length > MAX_TEXT || from < 0 || from >= to || to > text.length || !boundary(text, from) || !boundary(text, to)) throw new Error("正文选区无效或笔记过大。");
   const blocks = scanNativeText(text).filter((block) => from < block.to && to > block.from);
-  if (blocks.length !== 1 || !blocks[0].supported || from < blocks[0].from || to > blocks[0].to) throw new Error("请选择同一段落、标题或列表内的正文；未知 HTML、引用、表格和嵌套代码暂不支持。旧 HTML 请先执行恢复原生正文命令。");
+  if (blocks.length !== 1 || !blocks[0].supported || from < blocks[0].from || to > blocks[0].to) throw new Error("请选择同一段落、标题、列表或表格单元格内的正文；未知 HTML、引用和嵌套代码暂不支持。旧 HTML 请先执行恢复原生正文命令。");
   const block = blocks[0];
+  if (block.kind === "table" && !block.cells.some((cell) => from >= cell.from && to <= cell.to)) throw new Error("请选择同一个表格单元格内的文字，不支持跨单元格、跨行或表格分隔符。");
   if (block.status === "invalid" || block.status === "stale") throw new Error("正文颜色记录已过期或损坏，原文已保留；请执行“重置当前笔记的正文颜色记录”后重新着色。");
   return block;
 }
