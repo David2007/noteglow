@@ -189,15 +189,20 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
     }
     if ((tableCell || native) && spans.length && !applyOnly && nativeSelectionFormatState(decoded.text, [{ from: start, to: end }], format).applied) {
       // 一个正文片段可含多个相邻格式节点；整体取消时逐个移除 AST 分隔符，不能再包一层。
+      const wrapperEdits: Edit[] = []; let partial = false;
       walkMd(paragraph, (node) => {
         if (node.type !== wanted || !node.children?.length) return;
         const bounds = position(node), units = model.leaves.flatMap((leaf) => leaf.units).filter((unit) => unit.from >= bounds.from && unit.to <= bounds.to);
         const prose = model.leaves.filter((leaf) => !leaf.code).flatMap((leaf) => leaf.units);
         if (!prose.some((unit) => unit.from >= Math.max(start, bounds.from) && unit.to <= Math.min(end, bounds.to) && !/^\s+$/.test(unit.value))) return;
-        if (units.some((unit) => unit.from < start || unit.to > end)) throw new Error("取消格式时请完整选择已有格式片段，原文未修改。");
-        edits.push({ from: bounds.from, to: position(node.children[0]).from, text: "" }, { from: position(node.children.at(-1)!).to, to: bounds.to, text: "" });
+        if (units.some((unit) => unit.from < start || unit.to > end)) {
+          if (tableCell) throw new Error("取消格式时请完整选择已有格式片段，原文未修改。");
+          partial = true; return;
+        }
+        wrapperEdits.push({ from: bounds.from, to: position(node.children[0]).from, text: "" }, { from: position(node.children.at(-1)!).to, to: bounds.to, text: "" });
       });
-      spans.length = 0;
+      // 普通段落的部分选区沿用既有局部格式路径，不能移除覆盖未选文字的祖先。
+      if (!partial) { edits.push(...wrapperEdits); spans.length = 0; }
     }
     if ((tableCell || native) && applyOnly && spans.length) {
       // 混合状态只给尚未格式化的叶片添加标记，已格式化片段保留；代码叶片不参与。

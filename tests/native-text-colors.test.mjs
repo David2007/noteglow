@@ -714,7 +714,8 @@ test('cross-block native code toggles per paragraph and protected gaps reject th
 
 test('cross-block formatting preserves existing colors and rejects stale later block before any output',()=>{
  let source=applyNativeTextColor('one\n\ntwo',0,3,'foreground',fg).text;source=applyNativeTextColor(source,source.lastIndexOf('two'),source.lastIndexOf('two')+3,'background',bg).text;
- const result=formatNativeText(source,0,source.lastIndexOf('two')+3,'bold');assert.equal(scanNativeText(result.text).filter(block=>block.status==='valid').length,2);
+ const last=scanNativeText(source).find(block=>block.source==='two');assert.ok(last);
+ const result=formatNativeText(source,0,last.to,'bold');assert.equal(scanNativeText(result.text).filter(block=>block.status==='valid').length,2);
  assert.deepEqual(nativeTextColorRanges(result.text).map(range=>result.text.slice(range.from,range.to)),['one','two']);
  const stale=source.replace('two\n','changed\n');assert.throws(()=>formatNativeText(stale,0,stale.lastIndexOf('changed')+7,'bold'),/过期/);
 });

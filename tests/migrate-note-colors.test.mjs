@@ -56,7 +56,7 @@ test('migration CLI resumes exact legacy HTML interruption and preserves both ob
 test('migration CLI rejects unsupported member before writing any preflight file',async()=>{
  const notes={'first.md':note('alpha','alpha'),'unsupported.md':note('> beta','beta')};const f=await fixture(notes);
  try {
-  await assert.rejects(run(f,true),/请选择同一段落/);
+  await assert.rejects(run(f,true),/请选择支持的正文/);
   for(const [path,original] of Object.entries(notes))assert.equal(await readFile(join(f.vault,path),'utf8'),original.text);
   assert.equal(await readFile(f.sidecar,'utf8'),f.original);assert.deepEqual(await readdir(join(f.vault,'.obsidian/codex-notes-backups')),[]);
  } finally {await f.close();}
