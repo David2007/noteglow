@@ -1,7 +1,7 @@
 import { EditorState, StateField, ChangeSet } from "@codemirror/state";
 import { Decoration, EditorView, type DecorationSet } from "@codemirror/view";
 import { mapColorRanges, normalizeColor, replaceColor, mergeRanges, type ColorRange, type ColorProperty } from "./color-ranges.ts";
-import { nativeTextBlocks, nativeTextDocumentShape, nativeTextMetadataRecords, nativeTextQuoteGap, restoreOwnedInline, formatMarkdownSelection, type PortableColorEdit } from "./markdown-colors.ts";
+import { nativeTextBlocks, nativeTextDocumentShape, nativeTextMetadataRecords, nativeTextQuoteGap, restoreOwnedInline, formatMarkdownSelection, nativeSelectionFormatState, type PortableColorEdit } from "./markdown-colors.ts";
 
 const MARKER = "<!-- noteglow-text-colors:", PREFIX = MARKER + "1 ";
 const MAX_TEXT = 1_000_000, MAX_BLOCK = 200_000;
@@ -103,9 +103,8 @@ export function nativeTextColorRanges(text: string): ColorRange[] {
 function selectedBlock(text: string, from: number, to: number): NativeTextBlock {
   if (text.length > MAX_TEXT || from < 0 || from >= to || to > text.length || !boundary(text, from) || !boundary(text, to)) throw new Error("正文选区无效或笔记过大。");
   const blocks = scanNativeText(text).filter((block) => from < block.to && to > block.from);
-  if (blocks.length !== 1 || !blocks[0].supported || from < blocks[0].from || to > blocks[0].to) throw new Error("请选择同一段落、标题、列表或表格单元格内的正文；未知 HTML、引用和嵌套代码暂不支持。旧 HTML 请先执行恢复原生正文命令。");
+  if (blocks.length !== 1 || !blocks[0].supported || from < blocks[0].from || to > blocks[0].to) throw new Error("请选择同一段落、标题、列表或同一张表内的正文；未知 HTML、引用和嵌套代码暂不支持。旧 HTML 请先执行恢复原生正文命令。");
   const block = blocks[0];
-  if (block.kind === "table" && !block.cells.some((cell) => from >= cell.from && to <= cell.to)) throw new Error("请选择同一个表格单元格内的文字，不支持跨单元格、跨行或表格分隔符。");
   if (block.status === "invalid" || block.status === "stale") throw new Error("正文颜色记录已过期或损坏，原文已保留；请执行“重置当前笔记的正文颜色记录”后重新着色。");
   return block;
 }
@@ -116,11 +115,20 @@ function writeRanges(text: string, block: NativeTextBlock, ranges: ColorRange[])
   if (nativeTextDocumentShape(text) !== nativeTextDocumentShape(output)) throw new Error("颜色记录将改变列表或段落结构，原文已保留。");
   return output;
 }
-export function applyNativeTextColor(text: string, from: number, to: number, property?: ColorProperty, color?: string): PortableColorEdit {
-  const block = selectedBlock(text, from, to);
+interface TextSelection { from: number; to: number }
+/** 源码连续选择按格子裁剪；宿主矩形选择则只接受该表内的精确内容范围，绝不补选矩形外文字。 */
+function selectedTextRanges(block: NativeTextBlock, from: number, to: number, cells?: readonly TextSelection[]): TextSelection[] {
+  const ranges = cells ? [...cells] : block.kind === "table" ? block.cells.map((cell) => ({ from: Math.max(from, cell.from), to: Math.min(to, cell.to) })).filter((range) => range.to > range.from) : [{ from, to }];
+  if (!ranges.length || ranges.length > 10000 || (cells && block.kind !== "table")) throw new Error("所选单元格没有可格式化的文字，请勿只选择表格分隔符或空格子。");
+  ranges.sort((a, b) => a.from - b.from);
+  if (ranges.some((range, index) => !Number.isInteger(range.from) || !Number.isInteger(range.to) || range.from < from || range.to > to || range.from >= range.to || (index > 0 && ranges[index - 1].to > range.from) || (block.kind === "table" && !block.cells.some((cell) => range.from >= cell.from && range.to <= cell.to)))) throw new Error("表格选区已改变或跨越不同表格，请重新选择。");
+  return ranges;
+}
+export function applyNativeTextColor(text: string, from: number, to: number, property?: ColorProperty, color?: string, cells?: readonly TextSelection[]): PortableColorEdit {
+  const block = selectedBlock(text, from, to), selections = selectedTextRanges(block, from, to, cells);
   if (property && !normalizeColor(color ?? "")) throw new Error("请输入 #RGB 或 #RRGGBB。");
-  const units = block.units.filter((unit) => unit.from < to && unit.to > from);
-  if (!units.length || units.some((unit) => unit.from < from || unit.to > to)) throw new Error("请选择完整文字，不能拆开实体或只选择格式标签。");
+  const units = block.units.filter((unit) => selections.some((range) => unit.from < range.to && unit.to > range.from));
+  if (!units.length || units.some((unit) => !selections.some((range) => unit.from >= range.from && unit.to <= range.to))) throw new Error("请选择完整文字，不能拆开实体或只选择格式标签。");
   let ranges = block.ranges;
   const intervals: Array<{ from: number; to: number }> = [];
   for (const unit of units) { const last = intervals[intervals.length - 1]; if (last && unit.from <= last.to) last.to = Math.max(last.to, unit.to); else intervals.push({ ...unit }); }
@@ -128,9 +136,23 @@ export function applyNativeTextColor(text: string, from: number, to: number, pro
   return { text: writeRanges(text, block, ranges), from, to };
 }
 /** 格式只在本块原生 Markdown 上执行；携带颜色通过解析器的精确位置映射，绝不重建 HTML。 */
-export function formatNativeText(text: string, from: number, to: number, format: "bold" | "italic" | "code", applyOnly = false): PortableColorEdit {
-  const block = selectedBlock(text, from, to);
-  const result = formatMarkdownSelection(block.source, from - block.from, to - block.from, format, block.ranges, true, applyOnly);
+export function formatNativeText(text: string, from: number, to: number, format: "bold" | "italic" | "code", applyOnly = false, cells?: readonly TextSelection[]): PortableColorEdit {
+  const block = selectedBlock(text, from, to), selections = selectedTextRanges(block, from, to, cells).map((range) => ({ from: range.from - block.from, to: range.to - block.from }));
+  const batch = selections.length > 1;
+  if (block.kind === "table" && format !== "code") {
+    for (let index = selections.length - 1; index >= 0; index--) if (!nativeSelectionFormatState(block.source, [selections[index]], format).eligible) selections.splice(index, 1);
+    if (!selections.length) throw new Error("所选单元格没有可设置格式的正文。");
+  }
+  const batchApplyOnly = applyOnly || batch && !nativeSelectionFormatState(block.source, selections, format).applied;
+  let result: PortableColorEdit = { text: block.source, ranges: block.ranges, from: from - block.from, to: to - block.from };
+  let selectionTo = result.to;
+  // 先在内存从后向前改各格，前方原 offset 不变；任一格拒绝则整体不写，最终只交给宿主一次事务。
+  for (let index = selections.length - 1; index >= 0; index--) {
+    const range = selections[index];
+    const next = formatMarkdownSelection(result.text, range.from, range.to, format, result.ranges, true, batchApplyOnly);
+    selectionTo = index === selections.length - 1 ? next.to : selectionTo + next.text.length - result.text.length;
+    result = { ...next, to: selectionTo };
+  }
   const parsed = nativeTextBlocks(result.text);
   if (parsed.length !== 1 || !parsed[0].supported || parsed[0].kind !== block.kind || parsed[0].from !== 0 || parsed[0].to !== result.text.length) throw new Error("格式修改将改变段落结构，原文已保留。");
   const replacement = result.text + ((result.ranges?.length ?? 0) ? block.eol + block.eol + encodeNativeTextMetadata(result.text, result.ranges!) : "");

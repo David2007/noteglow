@@ -2,7 +2,7 @@ import { editorInfoField, editorLivePreviewField, MarkdownRenderChild, MarkdownV
 import { StateEffect } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { alignRenderedText, mergeRanges, mapColorRanges, normalizeColor, parseLastColors, parseNoteColors, projectMarkdown, relocateColorRanges, type ColoredNote, type ColorProperty, type ColorRange, type NoteColorsData } from "./color-ranges";
-import { projectNativeMarkdown, nativeTableCell, nativeTableEditorOffsets, mapRenderedCodeAtPosition, mapRenderedCodeSelection, decodeOwnedCodeBlocks, type PortableColorEdit } from "./markdown-colors";
+import { projectNativeMarkdown, nativeTableCell, nativeTableSelectedCells, nativeTableEditorOffsets, mapRenderedCodeAtPosition, mapRenderedCodeSelection, decodeOwnedCodeBlocks, type PortableColorEdit } from "./markdown-colors";
 import { readCodeDomSelection } from "./rendered-code-selection";
 import { createColorPicker } from "./color-picker";
 import { applyNativeCodeColor, backupNativeCodeMigration, createNativeMetadataField, mapMigratedCodePosition, migrateOwnedCodeToNative, minimalTextChange, nativeCodeColorTransactions, paintNativeCodeElement, scanNativeCode } from "./native-code-colors";
@@ -16,7 +16,7 @@ const sharedState = globalThis as unknown as Record<symbol, unknown>;
 const writeChannels = (sharedState[writeChannelsKey] ??= new WeakMap<object, Map<string, WriteChannel>>()) as WeakMap<object, Map<string, WriteChannel>>;
 const foregroundColors = ["#c0392b", "#d35400", "#8e6b00", "#1d7044", "#2167a8", "#7030a0", "#202020"];
 const backgroundColors = ["#fff88f", "#ffd6d6", "#ffe1b3", "#d6edcd", "#cde6ff", "#e6d5ff", "#eeeeee"];
-interface ColorSelection { path: string; text: string; from: number; to: number; editor: Editor; view: MarkdownView }
+interface ColorSelection { path: string; text: string; from: number; to: number; editor: Editor; view: MarkdownView; cells?: Array<{ from: number; to: number }> }
 interface EditColorSnapshot extends ColoredNote { sequence: number; bytes: number }
 const MAX_EDIT_SNAPSHOTS_PER_NOTE = 32;
 const MAX_EDIT_SNAPSHOT_BYTES = 4 * 1024 * 1024;
@@ -121,6 +121,9 @@ class NoteColorController {
     }, 100);
 
     plugin.registerDomEvent(document, "selectionchange", () => owner.showCodeToolbar());
+    // 宿主矩形选择只更新单元格 DOM，不产生原生文字 selectionchange；点击/Shift+方向键后补刷新。
+    plugin.registerDomEvent(document, "click", () => owner.showCodeToolbar());
+    plugin.registerDomEvent(document, "keyup", () => owner.showCodeToolbar());
     plugin.registerDomEvent(document, "scroll", () => { owner.hideCodeToolbar(); owner.closeColorPicker(); }, true);
     plugin.registerDomEvent(window, "resize", () => { owner.hideCodeToolbar(); owner.closeColorPicker(); });
     plugin.registerDomEvent(document, "keydown", (event) => { if (event.key === "Escape") owner.hideCodeToolbar(); });
@@ -272,6 +275,7 @@ class NoteColorController {
     if (this.colorPicker || this.codeToolbar?.contains(document.activeElement)) return;
     this.hideCodeToolbar();
     if (!this.enabled || this.disposed) return;
+    if (this.showTableToolbar()) return;
     const selection = document.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return;
     const range = selection.getRangeAt(0);
@@ -317,10 +321,55 @@ class NoteColorController {
     toolbar.style.top = `${Math.max(8, rect.top - toolbar.offsetHeight - 8)}px`;
   }
 
+  private captureTableSelection(view: MarkdownView): ColorSelection | null {
+    if (!view.file || view.getMode() !== "source") return null;
+    const widgets = Array.from(view.containerEl.querySelectorAll<HTMLElement>(".cm-table-widget.has-selection"));
+    if (widgets.length !== 1) return null;
+    const widget = widgets[0], tables = widget.querySelectorAll<HTMLTableElement>("table.table-editor");
+    if (tables.length !== 1) return null;
+    const table = tables[0], selected = Array.from(table.querySelectorAll<HTMLTableCellElement>("td.is-selected,th.is-selected"));
+    const text = view.editor.getValue(), editors = Array.from(this.editors).filter((editor) => editor.dom.contains(widget) && !editor.dom.closest("td,th") && editorPath(editor) === view.file?.path && editor.state.doc.toString() === text);
+    if (editors.length !== 1 || selected.length < 2) return null;
+    try {
+      const coordinates = selected.map((cell) => ({ row: Array.from(table.rows).indexOf(cell.parentElement as HTMLTableRowElement), column: cell.cellIndex }));
+      const cells = nativeTableSelectedCells(text, editors[0].posAtDOM(widget), coordinates);
+      if (!cells?.length) return null;
+      return { path: view.file.path, text, from: cells[0].from, to: cells.at(-1)!.to, editor: view.editor, view, cells };
+    } catch { return null; }
+  }
+
+  private showTableToolbar(): boolean {
+    const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) return false;
+    const captured = this.captureTableSelection(view);
+    if (!captured) return false;
+    const toolbar = document.createElement("div");
+    toolbar.className = "codex-notes-code-toolbar"; toolbar.setAttribute("role", "toolbar"); toolbar.setAttribute("aria-label", "NoteGlow 表格格式");
+    toolbar.addEventListener("mousedown", (event) => event.preventDefault());
+    const button = (label: string, action: () => void): void => { const el = document.createElement("button"); el.textContent = label; el.title = label; toolbar.appendChild(el); el.addEventListener("click", action); };
+    const run = (action: () => Promise<void>): void => { this.hideCodeToolbar(); void action().catch((error: unknown) => new Notice(errorText(error), 8000)); };
+    for (const [label, format] of [["加粗", "bold"], ["斜体", "italic"], ["行内代码", "code"]] as const) button(label, () => run(() => this.format(captured, format)));
+    for (const [label, property] of [["字体色", "foreground"], ["背景色", "background"]] as const) {
+      button(label, () => run(() => this.apply(captured, property, this.lastColor(property))));
+      button(`更换${label}`, () => { const rect = toolbar.getBoundingClientRect(); this.hideCodeToolbar(); this.openColorPicker(captured, property, rect); });
+    }
+    button("清除颜色", () => run(() => this.apply(captured)));
+    document.body.appendChild(toolbar); this.codeToolbar = toolbar;
+    const rect = view.containerEl.querySelector<HTMLElement>(".cm-table-widget.has-selection .is-selected")!.getBoundingClientRect();
+    toolbar.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - toolbar.offsetWidth - 8))}px`;
+    toolbar.style.top = `${Math.max(8, rect.top - toolbar.offsetHeight - 8)}px`;
+    return true;
+  }
+
   captureSelection(editor: Editor, view: MarkdownView): ColorSelection | null {
     if (!this.enabled || this.disposed) { new Notice("颜色功能暂不可用，请检查颜色记录。"); return null; }
     if (!view.file) { new Notice("请先打开一篇笔记。"); return null; }
     if (view.getMode() !== "source") { new Notice("请切换到编辑视图后选择文字。"); return null; }
+    if (view.containerEl.querySelector(".cm-table-widget.has-selection")) {
+      const table = this.captureTableSelection(view);
+      if (!table) new Notice("表格选择为空或来源已改变，请在同一张表内重新选择单元格。");
+      return table;
+    }
     if (editor.listSelections().length !== 1) { new Notice("一次请选择一个连续选区，可连续添加不同颜色。"); return null; }
     const text = editor.getValue();
     const from = editor.posToOffset(editor.getCursor("from"));
@@ -330,7 +379,7 @@ class NoteColorController {
   }
 
   async apply(selection: ColorSelection, property?: ColorProperty, color?: string): Promise<void> {
-    await this.writeMarkdown(selection, () => applyNativeCodeColor(selection.text, selection.from, selection.to, property, color) ?? applyNativeTextColor(selection.text, selection.from, selection.to, property, color), property, color);
+    await this.writeMarkdown(selection, () => applyNativeCodeColor(selection.text, selection.from, selection.to, property, color) ?? applyNativeTextColor(selection.text, selection.from, selection.to, property, color, selection.cells), property, color);
     if (property && color) this.lastFormat = { property, color: normalizeColor(color)! };
   }
 
@@ -360,14 +409,14 @@ class NoteColorController {
   }
 
   private async format(selection: ColorSelection, format: "bold" | "italic" | "code", applyOnly = false): Promise<void> {
-    await this.writeMarkdown(selection, () => formatNativeText(selection.text, selection.from, selection.to, format, applyOnly));
+    await this.writeMarkdown(selection, () => formatNativeText(selection.text, selection.from, selection.to, format, applyOnly, selection.cells));
     this.lastFormat = { format };
   }
 
   /** 颜色的事实来源是最终 Markdown。纯函数先完成所有核验，再进行一次可撤销编辑。 */
   private async writeMarkdown(selection: ColorSelection, createEdit: () => PortableColorEdit, property?: ColorProperty, color?: string): Promise<void> {
     if (this.disposed || !this.enabled) throw new Error("颜色功能暂不可用。");
-    if (selection.view.file?.path !== selection.path) throw new Error("选区来源已改变，请回到原笔记重新选择文字。");
+    if (selection.view.file?.path !== selection.path || (selection.cells && this.plugin.app.workspace.getActiveViewOfType(MarkdownView) !== selection.view)) throw new Error("选区来源已改变，请回到原笔记重新选择文字。");
     const views = this.plugin.app.workspace.getLeavesOfType("markdown").map((leaf) => leaf.view).filter((view): view is MarkdownView => view instanceof MarkdownView);
     const sources = views.filter((view) => view.file?.path === selection.path);
     if (!sources.length) throw new Error(`原笔记编辑视图已关闭（当前 ${views.length} 个 Markdown 视图），请重新打开原笔记。`);

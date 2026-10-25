@@ -187,6 +187,30 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
       edits.push({ from: bounds.from, to: position(enclosing.children[0]).from, text: "" }, { from: position(enclosing.children.at(-1)!).to, to: bounds.to, text: "" });
       spans.length = 0;
     }
+    if (tableCell && spans.length && !applyOnly && nativeSelectionFormatState(decoded.text, [{ from: start, to: end }], format).applied) {
+      // 一个格子可含多个相邻格式节点；整体取消时逐个移除 AST 分隔符，不能再包一层。
+      walkMd(paragraph, (node) => {
+        if (node.type !== wanted || !node.children?.length) return;
+        const bounds = position(node), units = model.leaves.flatMap((leaf) => leaf.units).filter((unit) => unit.from >= bounds.from && unit.to <= bounds.to);
+        const prose = model.leaves.filter((leaf) => !leaf.code).flatMap((leaf) => leaf.units);
+        if (!prose.some((unit) => unit.from >= Math.max(start, bounds.from) && unit.to <= Math.min(end, bounds.to) && !/^\s+$/.test(unit.value))) return;
+        if (units.some((unit) => unit.from < start || unit.to > end)) throw new Error("取消格式时请完整选择已有格式片段，原文未修改。");
+        edits.push({ from: bounds.from, to: position(node.children[0]).from, text: "" }, { from: position(node.children.at(-1)!).to, to: bounds.to, text: "" });
+      });
+      spans.length = 0;
+    }
+    if (tableCell && applyOnly && spans.length) {
+      // 混合状态只给尚未格式化的叶片添加标记，已格式化片段保留；代码叶片不参与。
+      spans.length = 0;
+      for (const leaf of selected.filter((leaf) => !leaf.code)) {
+        const units = leaf.units.filter((unit) => unit.from >= start && unit.to <= end);
+        if (!units.length) continue;
+        const from = units[0].from, to = units.at(-1)!.to;
+        let applied = false;
+        walkMd(paragraph, (node) => { const bounds = position(node); if (node.type === wanted && bounds.from <= from && bounds.to >= to) applied = true; });
+        if (!applied) spans.push({ from, to });
+      }
+    }
     for (const span of spans) {
       let partFrom = span.from, partTo = span.to;
       if (tableCell) {
@@ -987,4 +1011,37 @@ export function nativeTableEditorOffsets(source: string, local: string, base: nu
     pieces.push(source[i]); offsets.push(base + i);
   }
   return pieces.join("") === local ? offsets : null;
+}
+
+/** 原生表格的矩形选择按 AST 行列解析；空格子保留原样，越界或非矩形选择拒绝。 */
+export function nativeTableSelectedCells(text: string, anchor: number, coordinates: readonly { row: number; column: number }[]): Array<{ from: number; to: number }> | null {
+  if (!Number.isInteger(anchor) || !coordinates.length || coordinates.length > 10000 || coordinates.some(({ row, column }) => !Number.isInteger(row) || !Number.isInteger(column) || row < 0 || column < 0)) return null;
+  const rows = coordinates.map(({ row }) => row), columns = coordinates.map(({ column }) => column);
+  if (new Set(coordinates.map(({ row, column }) => `${row}:${column}`)).size !== coordinates.length || (Math.max(...rows) - Math.min(...rows) + 1) * (Math.max(...columns) - Math.min(...columns) + 1) !== coordinates.length) return null;
+  const tables = (parseMarkdown(text).children ?? []).filter((node) => node.type === "table" && position(node).from <= anchor && position(node).to >= anchor);
+  if (tables.length !== 1) return null;
+  const ranges: Array<{ from: number; to: number }> = [];
+  for (const { row, column } of coordinates) {
+    const cell = tables[0].children?.[row]?.children?.[column];
+    if (!cell) return null;
+    if (cell.children?.length) ranges.push({ from: position(cell.children[0]).from, to: position(cell.children.at(-1)!).to });
+  }
+  return ranges.sort((a, b) => a.from - b.from);
+}
+
+/** 批量切换看所有可见文字的实际 AST 格式，不能凭某一个格子或星号字面量决定。 */
+export function nativeSelectionFormatState(text: string, selections: readonly { from: number; to: number }[], format: Format): { eligible: boolean; applied: boolean } {
+  const model = buildModel(text, []), wanted = format === "bold" ? "strong" : "emphasis";
+  const wrappers: Array<{ from: number; to: number }> = [];
+  walkMd(model.ast, (node) => { if (node.type === wanted) wrappers.push(position(node)); });
+  let eligible = false, applied = true;
+  for (const leaf of model.leaves) {
+    if (format !== "code" && leaf.code) continue;
+    for (const unit of leaf.units) {
+      if (/^\s+$/.test(unit.value) || !selections.some((range) => unit.from >= range.from && unit.to <= range.to)) continue;
+      eligible = true;
+      if (format === "code" ? !leaf.code : !wrappers.some((range) => range.from <= unit.from && range.to >= unit.to)) applied = false;
+    }
+  }
+  return { eligible, applied: eligible && applied };
 }

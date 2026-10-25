@@ -6,7 +6,7 @@ import {EditorView} from '@codemirror/view';
 import {Window} from 'happy-dom';
 import {applyNativeTextColor,formatNativeText,scanNativeText,nativeTextColorRanges,nativeTextColorTransactions,migrateOwnedTextToNative,resetNativeTextMetadata,encodeNativeTextMetadata,createNativeTextMetadataField,nativeTextMetadataChanges,nativeTextOwnedRecords,repairNativeTextMetadata,isNativeTableNormalization} from '../src/native-text-colors.ts';
 import {applyNativeCodeColor,nativeCodeColorTransactions,scanNativeCode,minimalTextChange} from '../src/native-code-colors.ts';
-import {applyMarkdownColor,nativeTextDocumentShape,restoreOwnedInline,projectNativeMarkdown,nativeTableCell,nativeTableEditorOffsets} from '../src/markdown-colors.ts';
+import {applyMarkdownColor,nativeTextDocumentShape,restoreOwnedInline,projectNativeMarkdown,nativeTableCell,nativeTableEditorOffsets,nativeTableSelectedCells} from '../src/markdown-colors.ts';
 import {alignRenderedText} from '../src/color-ranges.ts';
 const bg='#fff88f',fg='#c0392b';
 const paint=(text,word,property='background',color=bg)=>{const from=text.indexOf(word);return applyNativeTextColor(text,from,from+word.length,property,color);};
@@ -526,9 +526,8 @@ test('table code toggle preserves escaped pipes, entities and emoji without maki
  assert.throws(()=>applyNativeTextColor(code.text,code.text.indexOf('\\|')+1,code.text.indexOf('\\|')+2,'background',bg),/实体/);
 });
 
-test('table selection rejects cell, row, separator and empty-cell boundaries for all actions',()=>{
- const from=tableFixture.indexOf('nil'),to=tableFixture.indexOf('发送')+2;
- const ranges=[[from,to],[from,tableFixture.indexOf('other')+5],[tableFixture.indexOf('---'),tableFixture.indexOf('---')+3],[0,1]];
+test('table selection rejects separators and empty cells for all actions',()=>{
+ const ranges=[[tableFixture.indexOf('---'),tableFixture.indexOf('---')+3],[0,1]];
  for(const [start,end] of ranges){
   assert.throws(()=>applyNativeTextColor(tableFixture,start,end,'background',bg),/单元格/);
   for(const format of ['bold','italic','code'])assert.throws(()=>formatNativeText(tableFixture,start,end,format),/单元格/);
@@ -631,4 +630,53 @@ test('active table editor maps only exact source and escaped-pipe transformation
  assert.deepEqual(nativeTableEditorOffsets('a\\|b','a|b',10),[10,11,13]);
  assert.deepEqual(nativeTableEditorOffsets('a\\\\|b','a\\\\|b',10),[10,11,12,13,14]);
  assert.equal(nativeTableEditorOffsets('same','different',0),null);
+});
+
+for(const format of ['bold','italic'])test(`table rectangle ${format} applies uniformly then removes while preserving code-only cells`,()=>{
+ const marker=format==='bold'?'**':'*',source=`| a | b | c |\n| :--- | ---: | --- |\n| ${marker}one${marker} | same | keep |\n| plain | \`only\` | keep |`;
+ const coords=[{row:1,column:0},{row:1,column:1},{row:2,column:0},{row:2,column:1}],cells=nativeTableSelectedCells(source,0,coords);
+ const first=formatNativeText(source,cells[0].from,cells.at(-1).to,format,false,cells);
+ assert.ok(first.text.includes(`| ${marker}one${marker} | ${marker}same${marker} | keep |`));assert.ok(first.text.includes(`| ${marker}plain${marker} | \`only\` | keep |`));
+ const nextCells=nativeTableSelectedCells(first.text,0,coords),second=formatNativeText(first.text,nextCells[0].from,nextCells.at(-1).to,format,false,nextCells);
+ assert.equal(second.text,source.replace(marker+'one'+marker,'one'));
+ const h=harness(source),change=minimalTextChange(source,first.text);h.edit({from:change.from,to:change.to,insert:change.insert});assert.equal(undo(h.target),true);assert.equal(h.text,source);
+});
+
+test('table rectangle colors retain empty cells, unselected duplicates and both properties through clear',()=>{
+ const source='before\n\n| a | b | c |\n| --- | :---: | ---: |\n| same |  | same |\n| same | word | same |\n\nafter',anchor=source.indexOf('| a');
+ const coords=[{row:1,column:0},{row:1,column:1},{row:2,column:0},{row:2,column:1}],cells=nativeTableSelectedCells(source,anchor,coords),from=cells[0].from,to=cells.at(-1).to;
+ assert.equal(cells.length,3);
+ let text=applyNativeTextColor(source,from,to,'background',bg,cells).text;text=applyNativeTextColor(text,from,to,'foreground',fg,cells).text;
+ assert.equal(resetNativeTextMetadata(text),source);assert.equal(scanNativeText(text).filter(block=>block.status==='valid').length,1);
+ const covered=nativeTextColorRanges(text);assert.equal(covered.length,6);assert.ok(covered.every(range=>cells.some(cell=>cell.from<=range.from&&cell.to>=range.to)));
+ assert.equal(applyNativeTextColor(text,from,to,undefined,undefined,cells).text,source);
+ assert.equal(nativeTableSelectedCells(source,0,coords),null);assert.equal(nativeTableSelectedCells(source,anchor,[coords[0],coords[3]]),null);
+ assert.throws(()=>applyNativeTextColor(source,from,source.length,'background',bg),/选择/);
+});
+
+test('source cross-row selection formats each cell and code batch failure is atomic',()=>{
+ const source='| a | b |\n| --- | --- |\n| one | two |\n| three | four |',from=source.indexOf('one'),to=source.indexOf('four')+4;
+ const result=formatNativeText(source,from,to,'code');assert.equal(result.text,source.replace('one','`one`').replace('two','`two`').replace('three','`three`').replace('four','`four`'));
+ const mixed=source.replace('four','text `code`');assert.throws(()=>formatNativeText(mixed,from,mixed.lastIndexOf('|')-1,'code'),/代码|连续/);
+ const only='| a | b |\n| --- | --- |\n| `one` | `two` |';assert.throws(()=>formatNativeText(only,only.indexOf('`one`'),only.indexOf('`two`')+5,'bold'),/正文/);
+});
+
+for(const [format,marker] of [['bold','**'],['italic','*']])test(`table aggregate ${format} handles adjacent wrappers without touching partial ancestors`,()=>{
+ const source=`| a | b |\n| --- | --- |\n| ${marker}one${marker} ${marker}two${marker} | ${marker}three${marker} |`,from=source.indexOf(marker+'one'),to=source.lastIndexOf('|')-1;
+ const off=formatNativeText(source,from,to,format);assert.equal(off.text,source.replaceAll(marker,''));
+ const mixed=source.replace(marker+'two'+marker,'two'),on=formatNativeText(mixed,mixed.indexOf(marker+'one'),mixed.lastIndexOf('|')-1,format);
+ assert.equal(on.text,source);
+ const partial=source.indexOf('one')+1;assert.throws(()=>formatNativeText(source,partial,to,format),/完整选择/);
+});
+
+test('batch with one mixed prose cell and one code-only cell retains aggregate apply semantics',()=>{
+ const source='| a | b |\n| --- | --- |\n| **one** two | `only` |',coords=[{row:1,column:0},{row:1,column:1}],cells=nativeTableSelectedCells(source,0,coords);
+ const result=formatNativeText(source,cells[0].from,cells.at(-1).to,'bold',false,cells);
+ assert.equal(result.text,source.replace('two','**two**'));
+});
+
+for(const [format,marker] of [['bold','**'],['italic','*']])test(`batch ${format} removal preserves independently formatted inline code`,()=>{
+ const source=`| a | b |\n| --- | --- |\n| ${marker}one${marker} ${marker}\`code\`${marker} | ${marker}two${marker} |`,coords=[{row:1,column:0},{row:1,column:1}],cells=nativeTableSelectedCells(source,0,coords);
+ const result=formatNativeText(source,cells[0].from,cells.at(-1).to,format,false,cells);
+ assert.equal(result.text,source.replace(marker+'one'+marker,'one').replace(marker+'two'+marker,'two'));
 });
