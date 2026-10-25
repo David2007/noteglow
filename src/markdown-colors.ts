@@ -132,7 +132,7 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
   if (!selected.length) throw new Error("请选择可设置格式的正文。");
   if (selected.some((leaf) => leaf.code && leaf.block)) throw new Error("代码块中的字面格式符不参与加粗或斜体；请在正文中设置格式。");
   const tableCell = findTableCell(model.ast, start, end);
-  if (format !== "code" && selected.some((leaf) => leaf.code) && !tableCell) throw new Error("行内代码不能直接切换加粗或斜体，请先取消代码格式。");
+  if (format !== "code" && selected.some((leaf) => leaf.code) && !tableCell && !native) throw new Error("行内代码不能直接切换加粗或斜体，请先取消代码格式。");
   const edits: Edit[] = [];
   if (format === "code") {
     if (selected.length !== 1) throw new Error("代码格式目前仅支持单个连续文本叶节点。");
@@ -172,23 +172,23 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
     const pFrom = position(paragraph).from, pTo = position(paragraph).to;
     start = Math.max(start, pFrom); end = Math.min(end, pTo);
     const wanted = format === "bold" ? "strong" : "emphasis";
-    // 单元格混选保留行内代码，按代码边界分段；空白留在格式符外，确保 Markdown 能解析。
+    // 原生正文混选保留行内代码，按代码边界分段；空白留在格式符外，确保 Markdown 能解析。
     const spans: Array<{ from: number; to: number }> = [];
     let cursor = start;
-    for (const leaf of tableCell ? selected.filter((leaf) => leaf.code) : []) {
+    for (const leaf of tableCell || native ? selected.filter((leaf) => leaf.code) : []) {
       spans.push({ from: cursor, to: Math.min(end, leaf.from) }); cursor = Math.max(cursor, leaf.to);
     }
     spans.push({ from: cursor, to: end });
     // 已有整段格式可能跨过代码；完整选中时直接移除外层，不在未闭合的祖先标记内拼接。
-    const enclosing = tableCell && selected.some((leaf) => leaf.code) ? findExactFormat(paragraph, start, end, wanted, selected) : null;
+    const enclosing = (tableCell || native) && selected.some((leaf) => leaf.code) ? findExactFormat(paragraph, start, end, wanted, selected) : null;
     if (enclosing?.children?.length) {
       if (applyOnly) return { text, from, to, ranges: [...legacyRanges] };
       const bounds = position(enclosing);
       edits.push({ from: bounds.from, to: position(enclosing.children[0]).from, text: "" }, { from: position(enclosing.children.at(-1)!).to, to: bounds.to, text: "" });
       spans.length = 0;
     }
-    if (tableCell && spans.length && !applyOnly && nativeSelectionFormatState(decoded.text, [{ from: start, to: end }], format).applied) {
-      // 一个格子可含多个相邻格式节点；整体取消时逐个移除 AST 分隔符，不能再包一层。
+    if ((tableCell || native) && spans.length && !applyOnly && nativeSelectionFormatState(decoded.text, [{ from: start, to: end }], format).applied) {
+      // 一个正文片段可含多个相邻格式节点；整体取消时逐个移除 AST 分隔符，不能再包一层。
       walkMd(paragraph, (node) => {
         if (node.type !== wanted || !node.children?.length) return;
         const bounds = position(node), units = model.leaves.flatMap((leaf) => leaf.units).filter((unit) => unit.from >= bounds.from && unit.to <= bounds.to);
@@ -199,7 +199,7 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
       });
       spans.length = 0;
     }
-    if (tableCell && applyOnly && spans.length) {
+    if ((tableCell || native) && applyOnly && spans.length) {
       // 混合状态只给尚未格式化的叶片添加标记，已格式化片段保留；代码叶片不参与。
       spans.length = 0;
       for (const leaf of selected.filter((leaf) => !leaf.code)) {
@@ -213,7 +213,7 @@ export function formatMarkdownSelection(text: string, from: number, to: number, 
     }
     for (const span of spans) {
       let partFrom = span.from, partTo = span.to;
-      if (tableCell) {
+      if (tableCell || native) {
         // 以可见文字定位分段，避免把跨代码的 strong/emphasis 起止标记拆进不同片段。
         const units = selected.filter((leaf) => !leaf.code).flatMap((leaf) => leaf.units).filter((unit) => unit.from >= partFrom && unit.to <= partTo);
         while (units.length && /^\s+$/.test(units[0].value)) units.shift();
@@ -735,7 +735,7 @@ export function nativeTextBlocks(text: string): Array<{ from: number; to: number
   return (ast.children ?? []).filter((node) => ["paragraph", "heading", "list", "table"].includes(node.type)).map((node) => {
     const { from, to } = position(node); let supported = true;
     const shape: unknown[] = [], cells: Array<{ from: number; to: number }> = [];
-    // 持久化仍以完整表格为单位；交互只允许同一非空单元格的内容，管道/分隔行不属于内容。
+    // 持久化仍以完整表格为单位；批量编辑按非空单元格裁剪，管道/分隔行不属于内容。
     walkMd(node, (child) => {
       if (child.type === "tableCell" && child.children?.length) cells.push({ from: position(child.children[0]).from, to: position(child.children.at(-1)!).to });
     });
@@ -1044,4 +1044,13 @@ export function nativeSelectionFormatState(text: string, selections: readonly { 
     }
   }
   return { eligible, applied: eligible && applied };
+}
+
+/** 跨行格式按实际正文容器分段，列表前缀、标题标记和表格管道不进入分隔符。 */
+export function nativeTextFormatRanges(text: string): Array<{ from: number; to: number }> {
+  const ranges: Array<{ from: number; to: number }> = [];
+  walkMd(parseMarkdown(text), (node) => {
+    if (["paragraph", "heading", "tableCell"].includes(node.type) && node.children?.length) ranges.push({ from: position(node.children[0]).from, to: position(node.children.at(-1)!).to });
+  });
+  return ranges;
 }

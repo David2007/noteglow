@@ -200,3 +200,13 @@ test('native rectangle command uses cell selection despite collapsed main cursor
  env.commands.get('clear-selection-colors').editorCallback(env.view.editor,env.view);await settle();
  assert.equal(env.text,env.source);assert.equal(env.transactions,2);assert.equal(env.saves,2);assert.deepEqual(notices,[]);
 });
+
+test('ordinary continuous selection across paragraphs uses the real command path and one save/undo',async t=>{
+ const env=await tableController(t),source='first \`code\` tail\n\nsecond paragraph\n\nthird paragraph';
+ env.el.replaceChildren();env.change(source);env.setDisk(source);
+ env.view.editor.getCursor=side=>side==='from'?{line:0,ch:0}:{line:4,ch:15};
+ env.commands.get('toggle-bold').editorCallback(env.view.editor,env.view);await settle();
+ assert.equal(env.text,'**first** \`code\` **tail**\n\n**second paragraph**\n\n**third paragraph**');
+ assert.equal(env.transactions,1);assert.equal(env.saves,1);assert.equal(env.disk,env.text);assert.deepEqual(notices,[]);
+ env.undo();assert.equal(env.text,source);
+});

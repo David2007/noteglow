@@ -1,7 +1,7 @@
 import { EditorState, StateField, ChangeSet } from "@codemirror/state";
 import { Decoration, EditorView, type DecorationSet } from "@codemirror/view";
 import { mapColorRanges, normalizeColor, replaceColor, mergeRanges, type ColorRange, type ColorProperty } from "./color-ranges.ts";
-import { nativeTextBlocks, nativeTextDocumentShape, nativeTextMetadataRecords, nativeTextQuoteGap, restoreOwnedInline, formatMarkdownSelection, nativeSelectionFormatState, type PortableColorEdit } from "./markdown-colors.ts";
+import { nativeTextBlocks, nativeTextDocumentShape, nativeTextMetadataRecords, nativeTextQuoteGap, restoreOwnedInline, formatMarkdownSelection, nativeSelectionFormatState, nativeTextFormatRanges, type PortableColorEdit } from "./markdown-colors.ts";
 
 const MARKER = "<!-- noteglow-text-colors:", PREFIX = MARKER + "1 ";
 const MAX_TEXT = 1_000_000, MAX_BLOCK = 200_000;
@@ -124,7 +124,53 @@ function selectedTextRanges(block: NativeTextBlock, from: number, to: number, ce
   if (ranges.some((range, index) => !Number.isInteger(range.from) || !Number.isInteger(range.to) || range.from < from || range.to > to || range.from >= range.to || (index > 0 && ranges[index - 1].to > range.from) || (block.kind === "table" && !block.cells.some((cell) => range.from >= cell.from && range.to <= cell.to)))) throw new Error("表格选区已改变或跨越不同表格，请重新选择。");
   return ranges;
 }
+/** 整个连续选区先校验；仅跳过块间空白和该块已有的有效记录，引用/围栏/未知 HTML 不静默略过。 */
+function selectedBlocks(text: string, from: number, to: number): NativeTextBlock[] {
+  if (text.length > MAX_TEXT || !Number.isInteger(from) || !Number.isInteger(to) || from < 0 || from >= to || to > text.length || !boundary(text, from) || !boundary(text, to)) throw new Error("正文选区无效或笔记过大。");
+  const blocks = scanNativeText(text).filter((block) => from < block.to && to > block.from);
+  if (!blocks.length) throw new Error("请选择支持的正文，不能只选择分隔符或颜色记录；旧 HTML 请先执行恢复原生正文命令。");
+  let cursor = from;
+  for (const block of blocks) {
+    if (!block.supported || text.slice(cursor, Math.max(cursor, block.from)).trim()) throw new Error("选区包含不支持的引用、代码块或 HTML，原文未修改；旧 HTML 请先执行恢复原生正文命令。");
+    if (block.status === "invalid" || block.status === "stale") throw new Error("正文颜色记录已过期或损坏，请先重置记录。");
+    if (to > block.to && to < block.metadataTo) throw new Error("请勿只选择部分颜色记录。");
+    cursor = Math.max(cursor, block.metadataTo);
+  }
+  if (text.slice(cursor, to).trim()) throw new Error("选区包含不支持的引用、代码块或 HTML，原文未修改；旧 HTML 请先执行恢复原生正文命令。");
+  return blocks;
+}
+
 export function applyNativeTextColor(text: string, from: number, to: number, property?: ColorProperty, color?: string, cells?: readonly TextSelection[]): PortableColorEdit {
+  const blocks = selectedBlocks(text, from, to);
+  if (cells && blocks.length !== 1) throw new Error("表格矩形选区不能跨越不同块。");
+  let output = text, end = to;
+  for (const block of [...blocks].reverse()) {
+    const edit = applyNativeTextColorBlock(output, Math.max(from, block.from), Math.min(to, block.to), property, color, cells);
+    const delta = edit.text.length - output.length;
+    // 颜色记录插入在块后；只有位于选区末端之前的记录才移动末端。
+    if (block.to < to) end += delta;
+    output = edit.text;
+  }
+  return { text: output, from, to: end };
+}
+
+export function formatNativeText(text: string, from: number, to: number, format: "bold" | "italic" | "code", applyOnly = false, cells?: readonly TextSelection[]): PortableColorEdit {
+  const blocks = selectedBlocks(text, from, to);
+  if (cells && blocks.length !== 1) throw new Error("表格矩形选区不能跨越不同块。");
+  const selections = blocks.flatMap((block) => selectedTextRanges(block, Math.max(from, block.from), Math.min(to, block.to), cells));
+  const batchApplyOnly = applyOnly || blocks.length > 1 && !nativeSelectionFormatState(text, selections, format).applied;
+  let output = text, start = from, end = to, touched = false;
+  for (const block of [...blocks].reverse()) {
+    const left = Math.max(from, block.from), right = Math.min(to, block.to);
+    if (format !== "code" && !nativeSelectionFormatState(text, [{ from: left, to: right }], format).eligible) continue;
+    const edit = formatNativeTextBlock(output, left, right, format, batchApplyOnly, cells);
+    end = touched ? end + edit.text.length - output.length : edit.to;
+    start = edit.from; output = edit.text; touched = true;
+  }
+  if (!touched) throw new Error("选区没有可设置格式的正文。");
+  return { text: output, from: start, to: end };
+}
+function applyNativeTextColorBlock(text: string, from: number, to: number, property?: ColorProperty, color?: string, cells?: readonly TextSelection[]): PortableColorEdit {
   const block = selectedBlock(text, from, to), selections = selectedTextRanges(block, from, to, cells);
   if (property && !normalizeColor(color ?? "")) throw new Error("请输入 #RGB 或 #RRGGBB。");
   const units = block.units.filter((unit) => selections.some((range) => unit.from < range.to && unit.to > range.from));
@@ -136,12 +182,13 @@ export function applyNativeTextColor(text: string, from: number, to: number, pro
   return { text: writeRanges(text, block, ranges), from, to };
 }
 /** 格式只在本块原生 Markdown 上执行；携带颜色通过解析器的精确位置映射，绝不重建 HTML。 */
-export function formatNativeText(text: string, from: number, to: number, format: "bold" | "italic" | "code", applyOnly = false, cells?: readonly TextSelection[]): PortableColorEdit {
-  const block = selectedBlock(text, from, to), selections = selectedTextRanges(block, from, to, cells).map((range) => ({ from: range.from - block.from, to: range.to - block.from }));
+function formatNativeTextBlock(text: string, from: number, to: number, format: "bold" | "italic" | "code", applyOnly = false, cells?: readonly TextSelection[]): PortableColorEdit {
+  const block = selectedBlock(text, from, to), selections = selectedTextRanges(block, from, to, cells).flatMap((range) => nativeTextFormatRanges(block.source).map((part) => ({ from: Math.max(range.from, part.from + block.from), to: Math.min(range.to, part.to + block.from) })).filter((part) => part.from < part.to)).map((range) => ({ from: range.from - block.from, to: range.to - block.from }));
+  if (!selections.length) throw new Error("请选择正文，不要只选择容器标记。");
   const batch = selections.length > 1;
-  if (block.kind === "table" && format !== "code") {
+  if (format !== "code") {
     for (let index = selections.length - 1; index >= 0; index--) if (!nativeSelectionFormatState(block.source, [selections[index]], format).eligible) selections.splice(index, 1);
-    if (!selections.length) throw new Error("所选单元格没有可设置格式的正文。");
+    if (!selections.length) throw new Error("选区没有可设置格式的正文。");
   }
   const batchApplyOnly = applyOnly || batch && !nativeSelectionFormatState(block.source, selections, format).applied;
   let result: PortableColorEdit = { text: block.source, ranges: block.ranges, from: from - block.from, to: to - block.from };
