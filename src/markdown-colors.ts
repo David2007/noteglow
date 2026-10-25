@@ -734,7 +734,7 @@ function findTableCell(ast: MdNode, from: number, to: number): MdNode | null {
 }
 
 /** 原生正文只接受已知 Markdown 容器；返回文字单元，列表号、链接地址和格式符不参与着色。 */
-export function nativeTextBlocks(text: string): Array<{ from: number; to: number; line: number; kind: string; structure: string; supported: boolean; cells: Array<{ from: number; to: number }>; units: Array<{ from: number; to: number }> }> {
+export function nativeTextBlocks(text: string): Array<{ from: number; to: number; line: number; kind: string; structure: string; supported: boolean; html: Array<{ from: number; to: number }>; cells: Array<{ from: number; to: number }>; units: Array<{ from: number; to: number }> }> {
   const ast = parseMarkdown(text), model = buildModel(text, []);
   const allowed = new Set(["paragraph", "heading", "list", "listItem", "text", "inlineCode", "strong", "emphasis", "delete", "link", "break", "table", "tableRow", "tableCell"]);
   return (ast.children ?? []).filter((node) => ["paragraph", "heading", "list", "table"].includes(node.type)).map((node) => {
@@ -745,11 +745,17 @@ export function nativeTextBlocks(text: string): Array<{ from: number; to: number
       if (child.type === "tableCell" && child.children?.length) cells.push({ from: position(child.children[0]).from, to: position(child.children.at(-1)!).to });
     });
     walkMd(node, (child) => shape.push([child.type, child.spread, child.ordered, child.start, child.depth, child.checked, child.url]));
-    walkMd(node, (child) => { if (!allowed.has(child.type)) supported = false; });
-    if (model.protected.some((range) => from < range.to && to > range.from) || model.unknownHtml.some((range) => from < range.to && to > range.from)) supported = false;
+    // HTML 仍由宿主处理；保护完整元素（含正文与嵌套），而非仅开闭标签。
+    // 同一原生段落内，元素之外的普通文字不应因邻近 HTML 被整块禁用。
+    const html = model.unknownHtml.filter((range) => from < range.to && to > range.from);
+    walkMd(node, (child) => {
+      // 旧插件 HTML 不进入此路径，避免格式入口解码整块时改变未选中的旧颜色。
+      if (!allowed.has(child.type) && !(child.type === "html" && html.some((range) => range.from <= position(child).from && range.to >= position(child).to))) supported = false;
+    });
+    if (model.protected.some((range) => from < range.to && to > range.from)) supported = false;
     const leaves = model.leaves.filter((leaf) => leaf.from >= from && leaf.to <= to);
     if (leaves.some((leaf) => leaf.owned || leaf.block)) supported = false;
-    return { from, to, line: node.position!.start.line - 1, kind: node.type, structure: JSON.stringify(shape), supported, cells, units: leaves.flatMap((leaf) => leaf.units.map(({ from, to }) => ({ from, to }))) };
+    return { from, to, line: node.position!.start.line - 1, kind: node.type, structure: JSON.stringify(shape), supported, html, cells, units: leaves.flatMap((leaf) => leaf.units.map(({ from, to }) => ({ from, to }))) };
   });
 }
 

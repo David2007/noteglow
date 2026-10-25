@@ -7,6 +7,7 @@ const MARKER = "<!-- noteglow-text-colors:", PREFIX = MARKER + "1 ";
 const MAX_TEXT = 1_000_000, MAX_BLOCK = 200_000;
 export interface NativeTextBlock {
   from: number; to: number; line: number; kind: string; structure: string; supported: boolean;
+  html: Array<{ from: number; to: number }>;
   cells: Array<{ from: number; to: number }>; units: Array<{ from: number; to: number }>; source: string; eol: string;
   metadataFrom: number; metadataTo: number; commentFrom: number;
   status: "none" | "valid" | "stale" | "invalid"; ranges: ColorRange[];
@@ -89,7 +90,7 @@ export function scanNativeText(text: string): NativeTextBlock[] {
       if (!raw.startsWith(PREFIX) || !raw.endsWith(" -->")) return block;
       const data = JSON.parse(raw.slice(PREFIX.length, -4));
       if (!data || Object.keys(data).sort().join() !== "ranges,source,version" || data.version !== 1 || typeof data.source !== "string" || encodeNativeTextMetadata(data.source, data.ranges) !== raw) return block;
-      block.status = item.supported && data.source === source ? "valid" : "stale";
+      block.status = item.supported && data.source === source && !data.ranges.some((range: ColorRange) => item.html.some((html) => item.from + range.from < html.to && item.from + range.to > html.from)) ? "valid" : "stale";
       if (block.status === "valid") block.ranges = data.ranges;
     } catch { /* 损坏记录保留，用户可通过重置命令清理。 */ }
     return block;
@@ -103,7 +104,7 @@ export function nativeTextColorRanges(text: string): ColorRange[] {
 function selectedBlock(text: string, from: number, to: number): NativeTextBlock {
   if (text.length > MAX_TEXT || from < 0 || from >= to || to > text.length || !boundary(text, from) || !boundary(text, to)) throw new Error("正文选区无效或笔记过大。");
   const blocks = scanNativeText(text).filter((block) => from < block.to && to > block.from);
-  if (blocks.length !== 1 || !blocks[0].supported || from < blocks[0].from || to > blocks[0].to) throw new Error("请选择同一段落、标题、列表或同一张表内的正文；未知 HTML、引用和嵌套代码暂不支持。旧 HTML 请先执行恢复原生正文命令。");
+  if (blocks.length !== 1 || !blocks[0].supported || blocks[0].html.some((range) => from < range.to && to > range.from) || from < blocks[0].from || to > blocks[0].to) throw new Error("请选择同一段落、标题、列表或同一张表内的正文；未知 HTML、引用和嵌套代码暂不支持。旧 HTML 请先执行恢复原生正文命令。");
   const block = blocks[0];
   if (block.status === "invalid" || block.status === "stale") throw new Error("正文颜色记录已过期或损坏，原文已保留；请执行“重置当前笔记的正文颜色记录”后重新着色。");
   return block;
@@ -131,7 +132,7 @@ function selectedBlocks(text: string, from: number, to: number): NativeTextBlock
   if (!blocks.length) throw new Error("请选择支持的正文，不能只选择分隔符或颜色记录；旧 HTML 请先执行恢复原生正文命令。");
   let cursor = from;
   for (const block of blocks) {
-    if (!block.supported || text.slice(cursor, Math.max(cursor, block.from)).trim()) throw new Error("选区包含不支持的引用、代码块或 HTML，原文未修改；旧 HTML 请先执行恢复原生正文命令。");
+    if (!block.supported || block.html.some((range) => from < range.to && to > range.from) || text.slice(cursor, Math.max(cursor, block.from)).trim()) throw new Error("选区包含不支持的引用、代码块或 HTML，原文未修改；旧 HTML 请先执行恢复原生正文命令。");
     if (block.status === "invalid" || block.status === "stale") throw new Error("正文颜色记录已过期或损坏，请先重置记录。");
     if (to > block.to && to < block.metadataTo) throw new Error("请勿只选择部分颜色记录。");
     cursor = Math.max(cursor, block.metadataTo);

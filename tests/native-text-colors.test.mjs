@@ -57,6 +57,76 @@ test('stale, corrupt and unsupported sources preserve text and expose a reset ro
  assert.equal(resetNativeTextMetadata('---\nvalue: "<!-- noteglow-text-colors:1 broken -->"\n---'),'---\nvalue: "<!-- noteglow-text-colors:1 broken -->"\n---');
 });
 
+test('plain text beside a complete HTML island supports colors, native formats and exact undo',()=>{
+ const source='前文 <strong>Token</strong>。这个 Token 可能是一个完整的单词。',word='这个 Token 可能是一个完整的单词。',from=source.indexOf(word);
+ for(const [format,marker] of [['bold','**'],['italic','*'],['code','`']]) {
+  const colored=applyNativeTextColor(source,from,source.length,'background',bg);
+  const formatted=formatNativeText(colored.text,from,source.length,format);
+  assert.equal(resetNativeTextMetadata(formatted.text),source.slice(0,from)+marker+word+marker);
+  assert.equal(scanNativeText(formatted.text)[0].status,'valid');
+  assert.deepEqual(nativeTextColorRanges(formatted.text).map(range=>formatted.text.slice(range.from,range.to)),[word]);
+  const foreground=applyNativeTextColor(formatted.text,formatted.from,formatted.to,'foreground',fg);
+  assert.equal(scanNativeText(foreground.text)[0].ranges.length,2);
+  const restored=formatNativeText(formatted.text,formatted.from,formatted.to,format);
+  assert.equal(resetNativeTextMetadata(restored.text),source);
+  assert.equal(applyNativeTextColor(restored.text,from,source.length).text,source);
+  const h=harness(source),change=minimalTextChange(source,formatted.text);
+  h.edit({from:change.from,to:change.to,insert:change.insert});
+  assert.equal(undo(h.target),true);assert.equal(h.text,source);
+  assert.equal(redo(h.target),true);assert.equal(h.text,formatted.text);
+ }
+ const before=applyNativeTextColor(source,0,2,'foreground',fg);
+ assert.deepEqual(nativeTextColorRanges(before.text).map(range=>before.text.slice(range.from,range.to)),['前文']);
+ const window=new Window(),el=window.document.createElement('div');
+ el.innerHTML='<p>前文 <strong>Token</strong>。这个 Token 可能是一个完整的单词。</p>';
+ const alignment=alignRenderedText(projectNativeMarkdown(source),el.textContent);
+ assert.ok(alignment);assert.equal(alignment[el.textContent.indexOf(word)],from);
+});
+
+test('HTML island interiors, attributes, nesting and malformed tails remain protected',()=>{
+ for(const island of ['<strong>inside</strong>','<span title="note"><em>inside</em></span>','<strong>inside','<strong><em>inside</strong>']) {
+  const source='before '+island+' after',inside=source.indexOf('inside');
+  for(const [from,to] of [[inside,inside+6],[0,inside+6],[inside,source.length],[0,source.length]]) {
+   assert.throws(()=>applyNativeTextColor(source,from,to,'background',bg),/HTML/);
+   for(const format of ['bold','italic','code'])assert.throws(()=>formatNativeText(source,from,to,format),/HTML/);
+  }
+ }
+ const owned='before <span data-codex-color="1" style="color:#c0392b">legacy</span> after';
+ assert.throws(()=>applyNativeTextColor(owned,0,6,'background',bg),/旧 HTML/);
+ assert.throws(()=>formatNativeText(owned,0,6,'bold'),/旧 HTML/);
+ const source='one\n\nbefore <strong>inside</strong> after\n\nlast';
+ assert.throws(()=>applyNativeTextColor(source,0,source.length,'background',bg),/HTML/);
+ assert.throws(()=>formatNativeText(source,0,source.length,'bold'),/HTML/);
+ const plain='before <strong>inside</strong> after',at=plain.indexOf('inside');
+ const invalid=plain+'\n\n'+encodeNativeTextMetadata(plain,[{from:at,to:at+6,property:'background',color:bg}]);
+ assert.equal(scanNativeText(invalid)[0].status,'stale');assert.deepEqual(nativeTextColorRanges(invalid),[]);
+ assert.throws(()=>applyNativeTextColor(invalid,0,6,'background',bg),/重置/);
+});
+
+test('ordinary input and Backspace beside HTML keep metadata valid and undo exact',()=>{
+ const source=paint('before <strong>Token</strong> alpha after','alpha').text,at=source.indexOf('alpha');
+ for(const [change,event,word] of [[{from:at+2,insert:'X'},'input.type','alXpha'],[{from:at+1,to:at+2},'delete.backward','apha']]) {
+  const h=harness(source);h.edit(change,event);
+  assert.equal(scanNativeText(h.text)[0].status,'valid');
+  assert.deepEqual(nativeTextColorRanges(h.text).map(range=>h.text.slice(range.from,range.to)),[word]);
+  assert.equal(resetNativeTextMetadata(h.text),'before <strong>Token</strong> '+word+' after');
+  assert.equal(undo(h.target),true);assert.equal(h.text,source);
+ }
+});
+
+test('HTML boundary adjacency is allowed but touching either tag edge is rejected',()=>{
+ const source='before <strong>inside</strong> after',htmlFrom=source.indexOf('<'),htmlTo=source.lastIndexOf('>')+1;
+ for(const [from,to] of [[0,htmlFrom],[htmlTo,source.length]]) {
+  const colored=applyNativeTextColor(source,from,to,'background',bg);
+  assert.equal(scanNativeText(colored.text)[0].status,'valid');assert.equal(resetNativeTextMetadata(colored.text),source);
+  for(const format of ['bold','italic','code'])assert.ok(formatNativeText(source,from,to,format).text.includes('<strong>inside</strong>'));
+ }
+ for(const [from,to] of [[0,htmlFrom+1],[htmlTo-1,source.length]]) {
+  assert.throws(()=>applyNativeTextColor(source,from,to,'background',bg),/HTML/);
+  for(const format of ['bold','italic','code'])assert.throws(()=>formatNativeText(source,from,to,format),/HTML/);
+ }
+});
+
 test('format and recolor keep native Markdown and earlier colors',()=>{
  const colored=paint('- alpha and beta','alpha').text;
  const from=colored.indexOf('alpha');const bold=formatNativeText(colored,from,from+5,'bold');
